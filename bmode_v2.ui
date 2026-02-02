@@ -95,7 +95,7 @@
         </widget>
        </item>
        <item>
-        <spacer name="verticalSpacer_bmode_menu">
+        <spacer name="verticalSpacer">
          <property name="orientation">
           <enum>Qt::Orientation::Vertical</enum>
          </property>
@@ -106,6 +106,44 @@
           </size>
          </property>
         </spacer>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_bmode_recorddir">
+         <item>
+          <widget class="QLineEdit" name="lineEdit_bmode_recorddir">
+           <property name="placeholderText">
+            <string>D:\</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="pushButton_bmode_recorddirClear">
+           <property name="text">
+            <string/>
+           </property>
+           <property name="icon">
+            <iconset theme="QIcon::ThemeIcon::EditClear"/>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="pushButton_bmode_recorddirBrowse">
+           <property name="text">
+            <string>Record Dir</string>
+           </property>
+           <property name="icon">
+            <iconset theme="QIcon::ThemeIcon::FolderOpen"/>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QPushButton" name="pushButton_bmode_recordStream">
+         <property name="text">
+          <string>Record</string>
+         </property>
+        </widget>
        </item>
       </layout>
      </item>

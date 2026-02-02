@@ -28,36 +28,36 @@ class Ui_Form(object):
         self.horizontalLayout_3.setObjectName(u"horizontalLayout_3")
         self.horizontalLayout_bmode = QHBoxLayout()
         self.horizontalLayout_bmode.setObjectName(u"horizontalLayout_bmode")
-        self.verticalLayout_menu = QVBoxLayout()
-        self.verticalLayout_menu.setObjectName(u"verticalLayout_menu")
+        self.verticalLayout_bmode_menu = QVBoxLayout()
+        self.verticalLayout_bmode_menu.setObjectName(u"verticalLayout_bmode_menu")
         self.comboBox_bmode_streamOption = QComboBox(Form)
         self.comboBox_bmode_streamOption.addItem("")
         self.comboBox_bmode_streamOption.addItem("")
         self.comboBox_bmode_streamOption.addItem("")
         self.comboBox_bmode_streamOption.setObjectName(u"comboBox_bmode_streamOption")
 
-        self.verticalLayout_menu.addWidget(self.comboBox_bmode_streamOption)
+        self.verticalLayout_bmode_menu.addWidget(self.comboBox_bmode_streamOption)
 
         self.comboBox_bmode_streamPort = QComboBox(Form)
         self.comboBox_bmode_streamPort.setObjectName(u"comboBox_bmode_streamPort")
         self.comboBox_bmode_streamPort.setEnabled(True)
 
-        self.verticalLayout_menu.addWidget(self.comboBox_bmode_streamPort)
+        self.verticalLayout_bmode_menu.addWidget(self.comboBox_bmode_streamPort)
 
-        self.horizontalLayout_calib = QHBoxLayout()
-        self.horizontalLayout_calib.setObjectName(u"horizontalLayout_calib")
+        self.horizontalLayout_bmode_calib = QHBoxLayout()
+        self.horizontalLayout_bmode_calib.setObjectName(u"horizontalLayout_bmode_calib")
         self.lineEdit_bmode_calibPath = QLineEdit(Form)
         self.lineEdit_bmode_calibPath.setObjectName(u"lineEdit_bmode_calibPath")
         self.lineEdit_bmode_calibPath.setEnabled(False)
 
-        self.horizontalLayout_calib.addWidget(self.lineEdit_bmode_calibPath)
+        self.horizontalLayout_bmode_calib.addWidget(self.lineEdit_bmode_calibPath)
 
         self.pushButton_bmode_calibClear = QPushButton(Form)
         self.pushButton_bmode_calibClear.setObjectName(u"pushButton_bmode_calibClear")
         icon = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.EditClear))
         self.pushButton_bmode_calibClear.setIcon(icon)
 
-        self.horizontalLayout_calib.addWidget(self.pushButton_bmode_calibClear)
+        self.horizontalLayout_bmode_calib.addWidget(self.pushButton_bmode_calibClear)
 
         self.pushButton_bmode_calibBrowse = QPushButton(Form)
         self.pushButton_bmode_calibBrowse.setObjectName(u"pushButton_bmode_calibBrowse")
@@ -65,23 +65,51 @@ class Ui_Form(object):
         icon1 = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.DocumentOpen))
         self.pushButton_bmode_calibBrowse.setIcon(icon1)
 
-        self.horizontalLayout_calib.addWidget(self.pushButton_bmode_calibBrowse)
+        self.horizontalLayout_bmode_calib.addWidget(self.pushButton_bmode_calibBrowse)
 
 
-        self.verticalLayout_menu.addLayout(self.horizontalLayout_calib)
+        self.verticalLayout_bmode_menu.addLayout(self.horizontalLayout_bmode_calib)
 
         self.pushButton_bmode_openStream = QPushButton(Form)
         self.pushButton_bmode_openStream.setObjectName(u"pushButton_bmode_openStream")
         self.pushButton_bmode_openStream.setEnabled(True)
 
-        self.verticalLayout_menu.addWidget(self.pushButton_bmode_openStream)
+        self.verticalLayout_bmode_menu.addWidget(self.pushButton_bmode_openStream)
 
         self.verticalSpacer = QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
 
-        self.verticalLayout_menu.addItem(self.verticalSpacer)
+        self.verticalLayout_bmode_menu.addItem(self.verticalSpacer)
+
+        self.horizontalLayout_bmode_recorddir = QHBoxLayout()
+        self.horizontalLayout_bmode_recorddir.setObjectName(u"horizontalLayout_bmode_recorddir")
+        self.lineEdit_bmode_recorddir = QLineEdit(Form)
+        self.lineEdit_bmode_recorddir.setObjectName(u"lineEdit_bmode_recorddir")
+
+        self.horizontalLayout_bmode_recorddir.addWidget(self.lineEdit_bmode_recorddir)
+
+        self.pushButton_bmode_recorddirClear = QPushButton(Form)
+        self.pushButton_bmode_recorddirClear.setObjectName(u"pushButton_bmode_recorddirClear")
+        self.pushButton_bmode_recorddirClear.setIcon(icon)
+
+        self.horizontalLayout_bmode_recorddir.addWidget(self.pushButton_bmode_recorddirClear)
+
+        self.pushButton_bmode_recorddirBrowse = QPushButton(Form)
+        self.pushButton_bmode_recorddirBrowse.setObjectName(u"pushButton_bmode_recorddirBrowse")
+        icon2 = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.FolderOpen))
+        self.pushButton_bmode_recorddirBrowse.setIcon(icon2)
+
+        self.horizontalLayout_bmode_recorddir.addWidget(self.pushButton_bmode_recorddirBrowse)
 
 
-        self.horizontalLayout_bmode.addLayout(self.verticalLayout_menu)
+        self.verticalLayout_bmode_menu.addLayout(self.horizontalLayout_bmode_recorddir)
+
+        self.pushButton_bmode_recordStream = QPushButton(Form)
+        self.pushButton_bmode_recordStream.setObjectName(u"pushButton_bmode_recordStream")
+
+        self.verticalLayout_bmode_menu.addWidget(self.pushButton_bmode_recordStream)
+
+
+        self.horizontalLayout_bmode.addLayout(self.verticalLayout_bmode_menu)
 
         self.label_bmode_image = QLabel(Form)
         self.label_bmode_image.setObjectName(u"label_bmode_image")
@@ -110,6 +138,10 @@ class Ui_Form(object):
         self.pushButton_bmode_calibClear.setText("")
         self.pushButton_bmode_calibBrowse.setText(QCoreApplication.translate("Form", u"Calib File", None))
         self.pushButton_bmode_openStream.setText(QCoreApplication.translate("Form", u"Open Stream", None))
+        self.lineEdit_bmode_recorddir.setPlaceholderText(QCoreApplication.translate("Form", u"D:\\", None))
+        self.pushButton_bmode_recorddirClear.setText("")
+        self.pushButton_bmode_recorddirBrowse.setText(QCoreApplication.translate("Form", u"Record Dir", None))
+        self.pushButton_bmode_recordStream.setText(QCoreApplication.translate("Form", u"Record", None))
         self.label_bmode_image.setText("")
     # retranslateUi
 

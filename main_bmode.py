@@ -2,16 +2,20 @@
 """Live-preview widget that streams from the selected USB camera into the Qt UI."""
 
 # Standard library helpers for launching a Qt application and accepting CLI args.
+import os
+import queue
 import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 # Optional typing helper preserved for future extensions or annotations.
 from typing import Optional
 
-# Third-party libs for video capture (OpenCV) and Qt widgets/layouts.
+# Third-party libs for video capture, image encoding, and Qt widgets/layouts.
 import cv2
+import numpy as np
 from PySide6.QtCore import QObject, Signal, QTimer, Qt
 from PySide6.QtGui import QGuiApplication, QImage, QPixmap, QScreen
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QWidget
@@ -24,6 +28,11 @@ from helpers.xml_stream_parser import (
     VideoDeviceExtractor,
     XmlStreamParser,
 )
+
+IMAGE_RECORD_QUEUE_MAXSIZE = 300
+JPEG_QUALITY = 85
+IMAGE_RECORD_DROP_WINDOW_SECONDS = 2.0
+IMAGE_RECORD_DROP_RATE_THRESHOLD = 0.05
 
 
 # Summary:
@@ -55,6 +64,8 @@ class BModeStreamProxy(QObject):
     frame_ready = Signal(object)
     state_changed = Signal(bool, str)
     error_message = Signal(str)
+    record_message = Signal(str)
+    record_stop = Signal(str)
 
     # Summary:
     # - Initialize the proxy and assign a stable objectName for slot naming consistency.
@@ -370,6 +381,300 @@ class ScreenGrabWorker(QObject):
         self._proxy.frame_ready.emit(packet)
 
 
+# Summary:
+# - Background worker that writes incoming B-mode frames as JPEG files on a thread.
+# - What it does: Accepts frames on the UI thread, enqueues them, and encodes/writes on a worker thread.
+class ImageRecordWorker:
+    # Summary:
+    # - Initialize the image recording worker and its thread state.
+    # - Input: `self`, `proxy` (BModeStreamProxy).
+    # - Returns: None.
+    def __init__(self, proxy: BModeStreamProxy) -> None:
+        # Store the proxy so background threads can send UI-safe signals.
+        self._proxy = proxy
+
+        # Track whether recording is active so we can ignore frames when stopped.
+        self._active = False
+        # Store thread resources that are created on start and released on stop.
+        self._queue: Optional[queue.Queue] = None
+        self._stop_event: Optional[threading.Event] = None
+        self._thread: Optional[threading.Thread] = None
+        self._session_dir: Optional[str] = None
+
+        # Track indexing so filenames are sorted by capture order.
+        self._frame_index = 0
+
+        # Track drop statistics to detect sustained overload on the UI thread.
+        self._record_drop_window_start: Optional[float] = None
+        self._record_drop_window_total = 0
+        self._record_drop_window_dropped = 0
+        self._record_overload_triggered = False
+
+        # Guard start/stop so we do not race if the UI toggles quickly.
+        self._lock = threading.Lock()
+
+    # Summary:
+    # - Build a unique session directory path for a new recording session.
+    # - Input: `record_dir` (str).
+    # - Returns: Full session directory path (str).
+    @staticmethod
+    def _build_session_dir(record_dir: str) -> str:
+        # Use UTC in the folder name so sessions are sortable and unambiguous.
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+        base_name = f"bmode_{timestamp}"
+        session_dir = os.path.join(record_dir, base_name)
+
+        # Add a numeric suffix when a folder with the same name already exists.
+        if not os.path.exists(session_dir):
+            return session_dir
+
+        for suffix in range(1, 1000):
+            candidate = os.path.join(record_dir, f"{base_name}_{suffix:03d}")
+            if not os.path.exists(candidate):
+                return candidate
+
+        # Fall back to the base name if we somehow exhausted all suffixes.
+        return session_dir
+
+    # Summary:
+    # - Start the JPEG writer thread and reset recording state for a new session.
+    # - Input: `self`, `record_dir` (str).
+    # - Returns: Created session directory path (str).
+    def start(self, record_dir: str) -> str:
+        # Ensure only one recording session is active at a time.
+        with self._lock:
+            if self._active:
+                return self._session_dir or record_dir
+            self._active = True
+
+            # Normalize and ensure the base record directory exists.
+            record_dir = os.path.abspath(record_dir)
+            try:
+                os.makedirs(record_dir, exist_ok=True)
+                session_dir = self._build_session_dir(record_dir)
+                os.makedirs(session_dir, exist_ok=True)
+            except OSError:
+                # Reset active state when the directory cannot be created.
+                self._active = False
+                self._session_dir = None
+                raise
+
+            # Reset per-session state before the writer thread starts.
+            self._session_dir = session_dir
+            self._frame_index = 0
+            self._record_drop_window_start = None
+            self._record_drop_window_total = 0
+            self._record_drop_window_dropped = 0
+            self._record_overload_triggered = False
+
+            # Create fresh queue/stop event per session so writer state is isolated.
+            self._queue = queue.Queue(maxsize=IMAGE_RECORD_QUEUE_MAXSIZE)
+            self._stop_event = threading.Event()
+
+            # Start the writer thread so JPEG encoding and disk I/O never block the UI.
+            self._thread = threading.Thread(
+                target=self._writer_loop,
+                args=(session_dir, self._queue, self._stop_event),
+                daemon=True,
+            )
+            # Thread start: begin draining frames to disk asynchronously.
+            self._thread.start()
+
+            return session_dir
+
+    # Summary:
+    # - Stop the active recording session and release writer resources safely.
+    # - Input: `self`, `reason` (str).
+    # - Returns: None.
+    def stop(self, reason: str = "") -> None:
+        # The UI owns user-facing messaging, so we only stop the worker here.
+        _ = reason
+
+        # Ensure stop is idempotent and thread-safe.
+        with self._lock:
+            if not self._active:
+                return
+            self._active = False
+
+            stop_event = self._stop_event
+            writer_thread = self._thread
+
+            # Clear references so new sessions start cleanly.
+            self._queue = None
+            self._thread = None
+            self._stop_event = None
+            self._session_dir = None
+
+        # Signal the writer thread to drain and exit.
+        if stop_event is not None:
+            stop_event.set()
+
+        # Join briefly so we do not freeze the UI while final frames flush.
+        if writer_thread is not None:
+            writer_thread.join(timeout=0.5)
+
+    # Summary:
+    # - Check whether recording is currently active.
+    # - Input: `self`.
+    # - Returns: True when recording is active (bool).
+    def is_active(self) -> bool:
+        # Lock to avoid racing a start/stop toggle.
+        with self._lock:
+            return self._active
+
+    # Summary:
+    # - Emit a proxy signal safely when the UI may have already been destroyed.
+    # - Input: `self`, `emit_fn` (callable), `args` (tuple[object, ...]).
+    # - Returns: None.
+    def _safe_emit(self, emit_fn, *args) -> None:
+        # Avoid crashing if Qt deletes the proxy while background threads still run.
+        try:
+            emit_fn(*args)
+        except RuntimeError:
+            # Ignore emits after the proxy is gone; shutdown is in progress.
+            return
+
+    # Summary:
+    # - Enqueue a frame for JPEG recording without blocking the UI thread.
+    # - Input: `self`, `packet` (FramePacket).
+    # - Returns: None.
+    def handle_frame(self, packet: FramePacket) -> None:
+        # Snapshot state under lock so stop/start does not race frame handling.
+        with self._lock:
+            if not self._active:
+                return
+            record_queue = self._queue
+            stop_event = self._stop_event
+
+        # Skip enqueue work when the queue is missing or a stop is pending.
+        if record_queue is None or (stop_event is not None and stop_event.is_set()):
+            return
+
+        # Only pass the minimal payload needed for the writer thread.
+        payload = (packet.timestamp_ms, packet.width, packet.height, packet.data)
+
+        # Enqueue without blocking to keep the UI thread responsive.
+        dropped = False
+        try:
+            record_queue.put_nowait(payload)
+        except queue.Full:
+            dropped = True
+
+        # Track drops over a time window to detect sustained overload.
+        now = time.monotonic()
+        if self._record_drop_window_start is None:
+            self._record_drop_window_start = now
+            self._record_drop_window_total = 0
+            self._record_drop_window_dropped = 0
+        self._record_drop_window_total += 1
+        if dropped:
+            self._record_drop_window_dropped += 1
+
+        window_elapsed = now - self._record_drop_window_start
+        if window_elapsed >= IMAGE_RECORD_DROP_WINDOW_SECONDS:
+            drop_rate = 0.0
+            if self._record_drop_window_total > 0:
+                drop_rate = (
+                    self._record_drop_window_dropped / self._record_drop_window_total
+                )
+            # Reset the window counters for the next measurement period.
+            self._record_drop_window_start = now
+            self._record_drop_window_total = 0
+            self._record_drop_window_dropped = 0
+
+            if drop_rate >= IMAGE_RECORD_DROP_RATE_THRESHOLD:
+                if not self._record_overload_triggered:
+                    # Stop recording once when sustained overload is detected.
+                    self._record_overload_triggered = True
+                    self._safe_emit(
+                        self._proxy.record_stop.emit,
+                        "Recording stopped because the encoder queue is overloaded.",
+                    )
+
+    # Summary:
+    # - Writer loop that encodes queued frames and saves them as JPEG files.
+    # - Input: `self`, `session_dir` (str), `record_queue` (queue.Queue),
+    #   `stop_event` (threading.Event).
+    # - Returns: None.
+    def _writer_loop(
+        self,
+        session_dir: str,
+        record_queue: queue.Queue,
+        stop_event: threading.Event,
+    ) -> None:
+        # Drain the queue until stopped, then exit once it is empty.
+        while True:
+            if stop_event.is_set():
+                # If a stop is requested, drain any remaining frames without blocking.
+                try:
+                    payload = record_queue.get_nowait()
+                except queue.Empty:
+                    break
+            else:
+                # When running, wait briefly for the next frame to reduce CPU usage.
+                try:
+                    payload = record_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+            timestamp_ms, width, height, data = payload
+            expected_size = int(width) * int(height) * 3
+            if len(data) < expected_size:
+                # Stop recording if frame data is incomplete to avoid corrupt files.
+                self._safe_emit(
+                    self._proxy.record_stop.emit,
+                    "Recording stopped because a frame was incomplete.",
+                )
+                stop_event.set()
+                break
+
+            try:
+                rgb = np.frombuffer(data, dtype=np.uint8).reshape((height, width, 3))
+            except ValueError:
+                # Stop recording if the byte buffer cannot be reshaped.
+                self._safe_emit(
+                    self._proxy.record_stop.emit,
+                    "Recording stopped because a frame could not be decoded.",
+                )
+                stop_event.set()
+                break
+
+            # Convert RGB to BGR for OpenCV's JPEG encoder.
+            bgr = rgb[:, :, ::-1]
+
+            # Encode to JPEG to keep disk writes lightweight.
+            ok, buffer = cv2.imencode(
+                ".jpg",
+                bgr,
+                [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY],
+            )
+            if not ok:
+                self._safe_emit(
+                    self._proxy.record_stop.emit,
+                    "Recording stopped because JPEG encoding failed.",
+                )
+                stop_event.set()
+                break
+
+            # Build the output path with a stable filename pattern.
+            filename = f"frame_{self._frame_index:06d}_{timestamp_ms}.jpg"
+            output_path = os.path.join(session_dir, filename)
+
+            try:
+                with open(output_path, "wb") as file_handle:
+                    file_handle.write(buffer.tobytes())
+            except OSError:
+                self._safe_emit(
+                    self._proxy.record_stop.emit,
+                    "Recording stopped because a file could not be written.",
+                )
+                stop_event.set()
+                break
+
+            # Increment the frame index so filenames remain ordered.
+            self._frame_index += 1
+
+
 # Summary: Main Qt window for the B-mode streaming UI.
 # What it does: Builds the widgets from the Designer `.ui`, wires signals, and manages stream state.
 # Input: Created with no args; uses `self.ui` widgets and internal state to react to user actions.
@@ -393,6 +698,8 @@ class BModeWidget(QWidget):
         self._proxy = BModeStreamProxy()
         self._camera_worker = CameraStreamWorker(self._proxy)
         self._screen_worker = ScreenGrabWorker(self._proxy, parent=self)
+        # Create the recording worker so the UI can offload JPEG writes.
+        self._image_record_worker = ImageRecordWorker(self._proxy)
 
         # Cache the most recent frame packet so the UI can render on a timer.
         self._latest_frame_packet: Optional[FramePacket] = None
@@ -412,6 +719,10 @@ class BModeWidget(QWidget):
         self._proxy.state_changed.connect(self._on_bmodeStreamProxy_state_changed)
         # Signal connection: surface worker errors on the UI thread.
         self._proxy.error_message.connect(self._on_bmodeStreamProxy_error_message)
+        # Signal connection: stop recording when the writer thread reports a failure.
+        self._proxy.record_stop.connect(self._on_bmodeStreamProxy_record_stop)
+        # Signal connection: surface non-fatal recording messages on the UI thread.
+        self._proxy.record_message.connect(self._on_bmodeStreamProxy_record_message)
 
         # Fill the stream port dropdown with any live camera indices we can open.
         self._populate_cameras()
@@ -436,6 +747,18 @@ class BModeWidget(QWidget):
         # Signal connection: clear the calibration path when the clear button is clicked.
         self.ui.pushButton_bmode_calibClear.clicked.connect(
             self._on_pushButton_bmode_calibClear_clicked
+        )
+        # Signal connection: clear the record directory when the clear button is clicked.
+        self.ui.pushButton_bmode_recorddirClear.clicked.connect(
+            self._on_pushButton_bmode_recorddirClear_clicked
+        )
+        # Signal connection: open a directory picker for the record directory.
+        self.ui.pushButton_bmode_recorddirBrowse.clicked.connect(
+            self._on_pushButton_bmode_recorddirBrowse_clicked
+        )
+        # Signal connection: toggle recording when the record button is clicked.
+        self.ui.pushButton_bmode_recordStream.clicked.connect(
+            self._on_pushButton_bmode_recordStream_clicked
         )
 
     # Summary: Scan for available cameras and show them in the dropdown.
@@ -576,6 +899,141 @@ class BModeWidget(QWidget):
         self.ui.lineEdit_bmode_calibPath.setPlaceholderText("D:\\")
         # Remove any cached calibration data so streaming can't reuse a stale file.
         self._screen_rect = None
+
+    # Summary: Slot function that clears the record directory line edit.
+    # What it does: Removes the record directory path so the user can pick a new one.
+    # Input: `self`.
+    # Returns: `None`.
+    def _on_pushButton_bmode_recorddirClear_clicked(self) -> None:
+        # UI state change: clear the selected record directory text.
+        self.ui.lineEdit_bmode_recorddir.setText("")
+
+    # Summary: Slot function that opens a directory picker for the record directory.
+    # What it does: Opens a directory-only dialog and stores the chosen path in the UI.
+    # Input: `self`.
+    # Returns: `None`.
+    def _on_pushButton_bmode_recorddirBrowse_clicked(self) -> None:
+        # Use the current text as the starting folder when it exists.
+        current_path = self.ui.lineEdit_bmode_recorddir.text().strip()
+        # Open a directory-only picker so the user can select a folder.
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select Record Directory",
+            current_path,
+            QFileDialog.ShowDirsOnly,
+        )
+        # Do nothing if the user cancels the dialog.
+        if not selected_dir:
+            return
+        # Normalize to an absolute path so downstream code is consistent.
+        absolute_path = os.path.abspath(selected_dir)
+        # UI state change: store the selected directory in the line edit.
+        self.ui.lineEdit_bmode_recorddir.setText(absolute_path)
+
+    # Summary: Slot function that starts or stops image recording.
+    # What it does: Toggles the JPEG writer thread based on current recording state.
+    # Input: `self`.
+    # Returns: `None`.
+    def _on_pushButton_bmode_recordStream_clicked(self) -> None:
+        # Toggle based on current recording state to keep the button behavior predictable.
+        if self._image_record_worker.is_active():
+            self._stop_recording()
+            return
+        self._start_recording()
+
+    # Summary: Start a new JPEG recording session on the UI thread.
+    # What it does: Validates the record directory, starts the writer thread, and locks UI controls.
+    # Input: `self`.
+    # Returns: `None`.
+    def _start_recording(self) -> None:
+        # Require an active stream so recordings stay aligned to live frames.
+        if not self._is_streaming:
+            QMessageBox.warning(
+                self,
+                "Stream Not Active",
+                "Start streaming before recording.",
+            )
+            return
+
+        # Validate the record directory so we fail fast on missing paths.
+        record_dir = self.ui.lineEdit_bmode_recorddir.text().strip()
+        if not record_dir:
+            QMessageBox.warning(
+                self,
+                "Missing Record Directory",
+                "Please choose a record directory before recording.",
+            )
+            return
+
+        # Normalize to an absolute path so sessions are created consistently.
+        record_dir = os.path.abspath(record_dir)
+
+        # Ensure the directory exists so the writer can create a session folder.
+        try:
+            os.makedirs(record_dir, exist_ok=True)
+        except OSError:
+            QMessageBox.warning(
+                self,
+                "Record Directory Error",
+                "The selected record directory could not be created.",
+            )
+            return
+
+        if not os.path.isdir(record_dir):
+            QMessageBox.warning(
+                self,
+                "Invalid Record Directory",
+                "The selected record directory does not exist.",
+            )
+            return
+        if not os.access(record_dir, os.W_OK):
+            QMessageBox.warning(
+                self,
+                "Record Directory Not Writable",
+                "The selected directory is not writable.",
+            )
+            return
+
+        # Start the writer thread so JPEG encoding and disk I/O stay off the UI thread.
+        try:
+            self._image_record_worker.start(record_dir)
+        except OSError:
+            QMessageBox.warning(
+                self,
+                "Record Directory Error",
+                "Failed to create the recording session directory.",
+            )
+            return
+
+        # UI state change: lock the record directory controls while recording is active.
+        self.ui.lineEdit_bmode_recorddir.setEnabled(False)
+        self.ui.pushButton_bmode_recorddirBrowse.setEnabled(False)
+        self.ui.pushButton_bmode_recorddirClear.setEnabled(False)
+        # UI state change: update the record button to show stop intent.
+        self.ui.pushButton_bmode_recordStream.setText("Stop Recording")
+
+    # Summary: Stop the active JPEG recording session and release writer resources.
+    # What it does: Stops the background thread, restores UI controls, and reports any reason.
+    # Input: `self`, `reason` (str).
+    # Returns: `None`.
+    def _stop_recording(self, reason: str = "") -> None:
+        # Avoid redundant work when recording is already stopped.
+        if not self._image_record_worker.is_active():
+            return
+
+        # Stop the recording worker so it can flush and close cleanly.
+        self._image_record_worker.stop(reason)
+
+        # UI state change: unlock the record directory controls.
+        self.ui.lineEdit_bmode_recorddir.setEnabled(True)
+        self.ui.pushButton_bmode_recorddirBrowse.setEnabled(True)
+        self.ui.pushButton_bmode_recorddirClear.setEnabled(True)
+        # UI state change: restore the record button text.
+        self.ui.pushButton_bmode_recordStream.setText("Record")
+
+        # Show the stop reason so the user understands why recording ended.
+        if reason:
+            QMessageBox.warning(self, "Recording Stopped", reason)
 
     # Summary: Start streaming based on the selected stream option.
     # What it does: Chooses camera streaming or screen streaming, then starts the appropriate worker.
@@ -720,6 +1178,8 @@ class BModeWidget(QWidget):
     def _on_bmodeStreamProxy_frame_ready(self, packet: FramePacket) -> None:
         # Cache the packet so rendering can happen on the display timer.
         self._latest_frame_packet = packet
+        # Enqueue the frame for recording without blocking the UI thread.
+        self._image_record_worker.handle_frame(packet)
 
     # Summary: Slot function that reacts to stream state changes and updates the UI.
     # What it does: Updates buttons/inputs, starts or stops the display timer, and clears the image on stop.
@@ -743,6 +1203,10 @@ class BModeWidget(QWidget):
             # Start the display timer to render cached frames on the UI thread.
             self._display_timer.start()
             return
+
+        # Stop recording if the stream ended so we do not write stale frames.
+        if self._image_record_worker.is_active():
+            self._stop_recording("Recording stopped because streaming ended.")
 
         # Update state to idle so the open button toggles back to start.
         self._is_streaming = False
@@ -774,6 +1238,27 @@ class BModeWidget(QWidget):
             QMessageBox.warning(self, "Stream Error", message)
         # Stop streaming so the UI resets after an error.
         self._stop_stream()
+
+    # Summary: Slot function that stops recording when the worker reports a failure.
+    # What it does: Stops the writer thread on the UI thread and surfaces the reason once.
+    # Input: `self`, `reason` (str).
+    # Returns: `None`.
+    def _on_bmodeStreamProxy_record_stop(self, reason: str) -> None:
+        # Stop recording safely on the UI thread when an error or overload occurs.
+        if self._image_record_worker.is_active():
+            self._stop_recording(reason)
+        elif reason:
+            # Still surface the message even if recording already stopped.
+            QMessageBox.warning(self, "Recording Stopped", reason)
+
+    # Summary: Slot function that surfaces non-fatal recording messages on the UI thread.
+    # What it does: Stores the latest message as a tooltip so the UI stays non-blocking.
+    # Input: `self`, `message` (str).
+    # Returns: `None`.
+    def _on_bmodeStreamProxy_record_message(self, message: str) -> None:
+        # Avoid modal dialogs for transient recording warnings.
+        if message:
+            self.ui.pushButton_bmode_recordStream.setToolTip(message)
 
     # Summary: Slot function that renders the latest cached frame on a timer.
     # What it does: Delegates to the render helper so heavy work stays on a controlled interval.
@@ -857,8 +1342,13 @@ class BModeWidget(QWidget):
     # Input: `self`, `event` (the Qt close event object).
     # Returns: `None`.
     def closeEvent(self, event) -> None:
+        # Stop recording so the writer thread can close cleanly.
+        if self._image_record_worker.is_active():
+            self._stop_recording("Recording stopped because the window closed.")
         # Ensure worker threads and timers are stopped when the window closes.
         self._stop_stream()
+        # Call the base class close handler after our cleanup.
+        super().closeEvent(event)
         event.accept()
 
 
