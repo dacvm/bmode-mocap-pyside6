@@ -48,7 +48,7 @@ class Ui_Form(object):
         self.horizontalLayout_bmode_calib.setObjectName(u"horizontalLayout_bmode_calib")
         self.lineEdit_bmode_calibPath = QLineEdit(Form)
         self.lineEdit_bmode_calibPath.setObjectName(u"lineEdit_bmode_calibPath")
-        self.lineEdit_bmode_calibPath.setEnabled(False)
+        self.lineEdit_bmode_calibPath.setEnabled(True)
 
         self.horizontalLayout_bmode_calib.addWidget(self.lineEdit_bmode_calibPath)
 
@@ -116,7 +116,7 @@ class Ui_Form(object):
 
         self.horizontalLayout_bmode.addWidget(self.label_bmode_image)
 
-        self.horizontalLayout_bmode.setStretch(0, 1)
+        self.horizontalLayout_bmode.setStretch(0, 2)
         self.horizontalLayout_bmode.setStretch(1, 3)
 
         self.horizontalLayout_3.addLayout(self.horizontalLayout_bmode)
@@ -134,11 +134,11 @@ class Ui_Form(object):
         self.comboBox_bmode_streamOption.setItemText(2, QCoreApplication.translate("Form", u"Stream Screen (This PC)", None))
 
         self.comboBox_bmode_streamPort.setPlaceholderText(QCoreApplication.translate("Form", u"Select USB Port", None))
-        self.lineEdit_bmode_calibPath.setPlaceholderText(QCoreApplication.translate("Form", u"D:/", None))
+        self.lineEdit_bmode_calibPath.setPlaceholderText(QCoreApplication.translate("Form", u"~/config.xml", None))
         self.pushButton_bmode_calibClear.setText("")
         self.pushButton_bmode_calibBrowse.setText(QCoreApplication.translate("Form", u"Calib File", None))
         self.pushButton_bmode_openStream.setText(QCoreApplication.translate("Form", u"Open Stream", None))
-        self.lineEdit_bmode_recorddir.setPlaceholderText(QCoreApplication.translate("Form", u"D:\\", None))
+        self.lineEdit_bmode_recorddir.setPlaceholderText(QCoreApplication.translate("Form", u"~/output/", None))
         self.pushButton_bmode_recorddirClear.setText("")
         self.pushButton_bmode_recorddirBrowse.setText(QCoreApplication.translate("Form", u"Record Dir", None))
         self.pushButton_bmode_recordStream.setText(QCoreApplication.translate("Form", u"Record", None))

@@ -86,10 +86,10 @@ class Ui_Form(object):
 
         self.verticalLayout_mocap_menu.addLayout(self.horizontalLayout_mocap_recorddir)
 
-        self.pushButton_mocap_record = QPushButton(Form)
-        self.pushButton_mocap_record.setObjectName(u"pushButton_mocap_record")
+        self.pushButton_mocap_recordStream = QPushButton(Form)
+        self.pushButton_mocap_recordStream.setObjectName(u"pushButton_mocap_recordStream")
 
-        self.verticalLayout_mocap_menu.addWidget(self.pushButton_mocap_record)
+        self.verticalLayout_mocap_menu.addWidget(self.pushButton_mocap_recordStream)
 
 
         self.horizontalLayout_mocap.addLayout(self.verticalLayout_mocap_menu)
@@ -106,7 +106,8 @@ class Ui_Form(object):
 
         self.horizontalLayout_mocap.addWidget(self.widget_mocap_matplotlib)
 
-        self.horizontalLayout_mocap.setStretch(1, 2)
+        self.horizontalLayout_mocap.setStretch(0, 2)
+        self.horizontalLayout_mocap.setStretch(1, 3)
 
         self.horizontalLayout_2.addLayout(self.horizontalLayout_mocap)
 
@@ -123,9 +124,9 @@ class Ui_Form(object):
 
         self.lineEdit_mocap_ip.setPlaceholderText(QCoreApplication.translate("Form", u"127.0.0.1", None))
         self.pushButton_mocap_openStream.setText(QCoreApplication.translate("Form", u"Open Stream", None))
-        self.lineEdit_mocap_recorddir.setPlaceholderText(QCoreApplication.translate("Form", u"D:\\", None))
+        self.lineEdit_mocap_recorddir.setPlaceholderText(QCoreApplication.translate("Form", u"~/output/", None))
         self.pushButton_mocap_recorddirClear.setText("")
         self.pushButton_mocap_recorddirBrowse.setText(QCoreApplication.translate("Form", u"Record Dir", None))
-        self.pushButton_mocap_record.setText(QCoreApplication.translate("Form", u"Record", None))
+        self.pushButton_mocap_recordStream.setText(QCoreApplication.translate("Form", u"Record", None))
     # retranslateUi
 
