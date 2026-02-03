@@ -18,91 +18,10 @@
     <layout class="QVBoxLayout" name="verticalLayout" stretch="0,3">
      <item>
       <layout class="QGridLayout" name="gridLayout_volume_menu">
-       <item row="0" column="4">
-        <widget class="QLabel" name="label_4">
-         <property name="text">
-          <string>Load Volume</string>
-         </property>
-        </widget>
-       </item>
-       <item row="2" column="1">
-        <widget class="QLineEdit" name="lineEdit_volume_outputdir">
+       <item row="0" column="5">
+        <widget class="QLineEdit" name="lineEdit_volume_volfile">
          <property name="placeholderText">
-          <string>~/output/</string>
-         </property>
-        </widget>
-       </item>
-       <item row="0" column="6">
-        <widget class="QPushButton" name="pushButton_volume_volfileBrowse">
-         <property name="text">
-          <string/>
-         </property>
-         <property name="icon">
-          <iconset theme="QIcon::ThemeIcon::DocumentOpen"/>
-         </property>
-        </widget>
-       </item>
-       <item row="1" column="5" colspan="2">
-        <widget class="QSlider" name="horizontalSlider_volume_threshold">
-         <property name="orientation">
-          <enum>Qt::Orientation::Horizontal</enum>
-         </property>
-         <property name="tickPosition">
-          <enum>QSlider::TickPosition::TicksBothSides</enum>
-         </property>
-        </widget>
-       </item>
-       <item row="0" column="3">
-        <widget class="QPushButton" name="pushButton_volume_configfileBrowse">
-         <property name="text">
-          <string/>
-         </property>
-         <property name="icon">
-          <iconset theme="QIcon::ThemeIcon::DocumentOpen"/>
-         </property>
-        </widget>
-       </item>
-       <item row="1" column="1">
-        <widget class="QLineEdit" name="lineEdit_volume_seqfile">
-         <property name="placeholderText">
-          <string>~/sequence.mha</string>
-         </property>
-        </widget>
-       </item>
-       <item row="0" column="1">
-        <widget class="QLineEdit" name="lineEdit_volume_configfile">
-         <property name="placeholderText">
-          <string>~/config.xml</string>
-         </property>
-        </widget>
-       </item>
-       <item row="1" column="3">
-        <widget class="QPushButton" name="pushButton_volume_seqfileBrowse">
-         <property name="text">
-          <string/>
-         </property>
-         <property name="icon">
-          <iconset theme="QIcon::ThemeIcon::DocumentOpen"/>
-         </property>
-        </widget>
-       </item>
-       <item row="1" column="2">
-        <widget class="QPushButton" name="pushButton_volume_seqfileClear">
-         <property name="text">
-          <string/>
-         </property>
-         <property name="icon">
-          <iconset theme="QIcon::ThemeIcon::EditClear"/>
-         </property>
-        </widget>
-       </item>
-       <item row="2" column="2">
-        <widget class="QPushButton" name="pushButton_volume_outputdirClear">
-         <property name="text">
-          <string/>
-         </property>
-         <property name="icon">
-          <iconset theme="QIcon::ThemeIcon::EditClear"/>
+          <string>~/volume.mha</string>
          </property>
         </widget>
        </item>
@@ -123,10 +42,71 @@
          </property>
         </widget>
        </item>
+       <item row="2" column="2">
+        <widget class="QPushButton" name="pushButton_volume_outputdirClear">
+         <property name="text">
+          <string/>
+         </property>
+         <property name="icon">
+          <iconset theme="QIcon::ThemeIcon::EditClear"/>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="1">
+        <widget class="QLineEdit" name="lineEdit_volume_outputdir">
+         <property name="placeholderText">
+          <string>~/output/</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="2">
+        <widget class="QPushButton" name="pushButton_volume_seqfileClear">
+         <property name="text">
+          <string/>
+         </property>
+         <property name="icon">
+          <iconset theme="QIcon::ThemeIcon::EditClear"/>
+         </property>
+        </widget>
+       </item>
        <item row="0" column="0">
         <widget class="QLabel" name="label">
          <property name="text">
           <string>Config File</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="1">
+        <widget class="QLineEdit" name="lineEdit_volume_configfile">
+         <property name="placeholderText">
+          <string>~/config.xml</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="1">
+        <widget class="QLineEdit" name="lineEdit_volume_seqfile">
+         <property name="placeholderText">
+          <string>~/sequence.mha</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="6">
+        <widget class="QPushButton" name="pushButton_volume_volfileBrowse">
+         <property name="text">
+          <string/>
+         </property>
+         <property name="icon">
+          <iconset theme="QIcon::ThemeIcon::DocumentOpen"/>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="3">
+        <widget class="QPushButton" name="pushButton_volume_seqfileBrowse">
+         <property name="text">
+          <string/>
+         </property>
+         <property name="icon">
+          <iconset theme="QIcon::ThemeIcon::DocumentOpen"/>
          </property>
         </widget>
        </item>
@@ -140,17 +120,17 @@
          </property>
         </widget>
        </item>
-       <item row="0" column="5">
-        <widget class="QLineEdit" name="lineEdit_volume_volfile">
-         <property name="placeholderText">
-          <string>~/volume.mha</string>
-         </property>
-        </widget>
-       </item>
        <item row="1" column="4">
         <widget class="QLabel" name="label_7">
          <property name="text">
           <string>Threshold</string>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="0" colspan="4">
+        <widget class="QPushButton" name="pushButton_volume_reconstruct">
+         <property name="text">
+          <string>Reconstruct Volume</string>
          </property>
         </widget>
        </item>
@@ -161,10 +141,37 @@
          </property>
         </widget>
        </item>
-       <item row="3" column="0" colspan="4">
-        <widget class="QPushButton" name="pushButton_volume_reconstruct">
+       <item row="0" column="3">
+        <widget class="QPushButton" name="pushButton_volume_configfileBrowse">
          <property name="text">
-          <string>Reconstruct Volume</string>
+          <string/>
+         </property>
+         <property name="icon">
+          <iconset theme="QIcon::ThemeIcon::DocumentOpen"/>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="4">
+        <widget class="QLabel" name="label_4">
+         <property name="text">
+          <string>Load Volume</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="7">
+        <widget class="QPushButton" name="pushButton_volume_volload">
+         <property name="text">
+          <string>Load</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="5" colspan="3">
+        <widget class="QSlider" name="horizontalSlider_volume_threshold">
+         <property name="orientation">
+          <enum>Qt::Orientation::Horizontal</enum>
+         </property>
+         <property name="tickPosition">
+          <enum>QSlider::TickPosition::TicksBothSides</enum>
          </property>
         </widget>
        </item>

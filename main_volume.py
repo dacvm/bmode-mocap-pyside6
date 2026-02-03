@@ -2,12 +2,16 @@
 
 # Standard library helpers for path normalization.
 import os
+from typing import Optional
 
 # Qt widgets for the main window and file dialogs.
-from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 # Generated UI class from Qt Designer (do not edit the _ui.py file).
 from volume_ui import Ui_Form as Ui_Volume
+
+from helpers.mha_reader import MhaReader
+from helpers.mha_volume import MhaVolume
 
 DEFAULT_CONFIG_FILE = (
     "configs/PlusDeviceSet_fCal_Epiphan_NDIPolaris_RadboudUMC_20241219_150400.xml"
@@ -65,6 +69,15 @@ class VolumeWidget(QWidget):
         self.ui.pushButton_volume_volfileBrowse.clicked.connect(
             self._on_pushButton_volume_volfileBrowse_clicked
         )
+        # Signal connection: load the selected volume MHA file.
+        self.ui.pushButton_volume_volload.clicked.connect(
+            self._on_pushButton_volume_volload_clicked
+        )
+
+        # Keep a reader instance so we can reuse it for multiple loads.
+        self._mha_reader = MhaReader()
+        # Track the last loaded volume so other actions can reuse it later.
+        self._mha_volume: Optional[MhaVolume] = None
 
     # Summary:
     # - Resolve a safe starting path for file dialogs.
@@ -192,6 +205,36 @@ class VolumeWidget(QWidget):
             return
         # UI state change: store the selected file path.
         self.ui.lineEdit_volume_volfile.setText(os.path.abspath(selected_file))
+
+    # Summary:
+    # - Slot function that loads the selected volume MHA file.
+    # - Input: `self`.
+    # - Returns: None.
+    def _on_pushButton_volume_volload_clicked(self) -> None:
+        # Read the volume file path from the line edit and validate it first.
+        volfile_text = self.ui.lineEdit_volume_volfile.text().strip()
+        if not volfile_text:
+            # UI state change: notify the user the path is required.
+            QMessageBox.warning(self, "Missing Volume File", "Select a volume .mha file first.")
+            return
+
+        volfile_path = os.path.abspath(volfile_text)
+        if not os.path.isfile(volfile_path):
+            # UI state change: notify the user when the file is not found.
+            QMessageBox.warning(
+                self,
+                "Volume File Not Found",
+                f"The file does not exist:\n{volfile_path}",
+            )
+            return
+
+        # Load the .mha file into a MhaVolume container (no reconstruction yet).
+        try:
+            self._mha_volume = self._mha_reader.read(volfile_path, use_memmap=True)
+        except ValueError as exc:
+            # UI state change: surface parsing errors without crashing the UI.
+            QMessageBox.warning(self, "Volume Load Failed", str(exc))
+            return
 
 
 # Summary:
