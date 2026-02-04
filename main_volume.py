@@ -19,11 +19,11 @@ from volume_ui import Ui_Form as Ui_Volume
 
 from helpers.mha_reader import MhaReader
 from helpers.mha_volume import MhaVolume
-from helpers.volume_reconstructor import (
+from helpers.mha_volume_geometry_builder import (
     DEFAULT_MAX_POINTS,
     DEFAULT_THRESHOLD,
-    ReconstructionResult,
-    VolumeReconstructor,
+    GeometryBuildingResult,
+    MhaVolumeGeometryBuilder,
 )
 
 DEFAULT_CONFIG_FILE = (
@@ -36,7 +36,7 @@ VOLUME_THRESHOLD_DEBOUNCE_MS = 100
 
 
 # Summary:
-# - Matplotlib canvas that renders reconstructed volume points in 3D.
+# - Matplotlib canvas that renders volume geometry points in 3D.
 # - What it does: owns a Figure, a 3D Axes, and a persistent scatter handle for updates.
 class Volume3DCanvas(FigureCanvas):
     # Summary:
@@ -70,7 +70,7 @@ class Volume3DCanvas(FigureCanvas):
             self.setParent(parent)
 
     # Summary:
-    # - Update the scatter points and axes bounds from a reconstruction result.
+    # - Update the scatter points and axes bounds from a geometry-building result.
     # - Input: `self`, `points_xyz` (np.ndarray), `intensities` (np.ndarray | None),
     #   `min_xyz` (np.ndarray | None), `max_xyz` (np.ndarray | None).
     # - Returns: None.
@@ -128,9 +128,9 @@ class Volume3DCanvas(FigureCanvas):
 
 
 # Summary:
-# - Qt signal bridge that delivers reconstruction results to the UI thread.
+# - Qt signal bridge that delivers geometry-building results to the UI thread.
 # - What it does: exposes a result_ready signal that carries (result, request_id).
-class VolumeReconstructProxy(QObject):
+class VolumeBuildGeometryProxy(QObject):
     result_ready = Signal(object, int)
 
     # Summary:
@@ -140,32 +140,33 @@ class VolumeReconstructProxy(QObject):
     def __init__(self) -> None:
         super().__init__()
         # Give the proxy a name so slot handlers can follow the naming convention.
-        self.setObjectName("volumeReconstructProxy")
+        self.setObjectName("volumeBuildGeometryProxy")
 
 
 # Summary:
-# - Background worker that runs volume reconstruction without blocking the UI thread.
+# - Background worker that runs volume geometry building without blocking the UI thread.
 # - What it does: starts a thread per request and emits results through a proxy signal.
-class VolumeReconstructWorker:
+class VolumeBuildGeometryWorker:
     # Summary:
-    # - Initialize the worker with a signal proxy and reconstructor.
-    # - Input: `self`, `proxy` (VolumeReconstructProxy), `reconstructor` (VolumeReconstructor).
+    # - Initialize the worker with a signal proxy and geometry builder.
+    # - Input: `self`, `proxy` (VolumeBuildGeometryProxy), `geometry_builder`
+    #   (MhaVolumeGeometryBuilder).
     # - Returns: None.
     def __init__(
         self,
-        proxy: VolumeReconstructProxy,
-        reconstructor: VolumeReconstructor,
+        proxy: VolumeBuildGeometryProxy,
+        geometry_builder: MhaVolumeGeometryBuilder,
     ) -> None:
         # Store references so background threads can compute and emit results.
         self._proxy = proxy
-        self._reconstructor = reconstructor
+        self._geometry_builder = geometry_builder
 
     # Summary:
-    # - Start a reconstruction in a background thread.
+    # - Start a geometry build in a background thread.
     # - Input: `self`, `threshold` (float), `max_points` (int), `request_id` (int).
     # - Returns: None.
     def start(self, threshold: float, max_points: int, request_id: int) -> None:
-        # Thread start: run reconstruction in the background so the UI stays responsive.
+        # Thread start: run geometry building in the background so the UI stays responsive.
         thread = threading.Thread(
             target=self._run,
             args=(threshold, max_points, request_id),
@@ -174,12 +175,12 @@ class VolumeReconstructWorker:
         thread.start()
 
     # Summary:
-    # - Thread worker that computes the reconstruction and emits results.
+    # - Thread worker that builds geometry and emits results.
     # - Input: `self`, `threshold` (float), `max_points` (int), `request_id` (int).
     # - Returns: None.
     def _run(self, threshold: float, max_points: int, request_id: int) -> None:
-        # Compute the reconstruction off the UI thread.
-        result = self._reconstructor.reconstruct(
+        # Compute the geometry build off the UI thread.
+        result = self._geometry_builder.build_geometry(
             threshold=threshold,
             max_points=max_points,
             mode="preview",
@@ -261,11 +262,11 @@ class VolumeWidget(QWidget):
         self._volume_canvas = Volume3DCanvas(self.ui.widget_volume_scatter)
         self.ui.verticalLayout_volume_scatter.addWidget(self._volume_canvas)
 
-        # Create a proxy to deliver reconstruction results back to the UI thread.
-        self._reconstruct_proxy = VolumeReconstructProxy()
-        # Signal connection: apply reconstruction results on the UI thread.
-        self._reconstruct_proxy.result_ready.connect(
-            self._on_volumeReconstructProxy_result_ready
+        # Create a proxy to deliver geometry-building results back to the UI thread.
+        self._build_geometry_proxy = VolumeBuildGeometryProxy()
+        # Signal connection: apply geometry-building results on the UI thread.
+        self._build_geometry_proxy.result_ready.connect(
+            self._on_volumeBuildGeometryProxy_result_ready
         )
 
         # Create a debounce timer so slider drags do not spam heavy work.
@@ -273,7 +274,7 @@ class VolumeWidget(QWidget):
         self._volume_threshold_timer.setObjectName("volumeThresholdDebounceTimer")
         self._volume_threshold_timer.setSingleShot(True)
         self._volume_threshold_timer.setInterval(VOLUME_THRESHOLD_DEBOUNCE_MS)
-        # Signal connection: fire reconstruction once the user pauses slider movement.
+        # Signal connection: fire geometry building once the user pauses slider movement.
         self._volume_threshold_timer.timeout.connect(
             self._on_volumeThresholdDebounceTimer_timeout
         )
@@ -287,15 +288,15 @@ class VolumeWidget(QWidget):
         # Track the last loaded volume so other actions can reuse it later.
         self._mha_volume: Optional[MhaVolume] = None
 
-        # Track the reconstructor and worker so we can rebuild when a new volume loads.
-        self._reconstructor: Optional[VolumeReconstructor] = None
-        self._reconstruct_worker: Optional[VolumeReconstructWorker] = None
+        # Track the geometry builder and worker so we can rebuild when a new volume loads.
+        self._geometry_builder: Optional[MhaVolumeGeometryBuilder] = None
+        self._build_geometry_worker: Optional[VolumeBuildGeometryWorker] = None
         # Track pending slider values for the debounce timer.
         self._pending_threshold = DEFAULT_THRESHOLD
         # Track the maximum number of points to render for performance.
         self._max_points = DEFAULT_MAX_POINTS
         # Generation counter so stale worker results are ignored.
-        self._reconstruct_request_id = 0
+        self._build_geometry_request_id = 0
 
     # Summary:
     # - Resolve a safe starting path for file dialogs.
@@ -446,7 +447,7 @@ class VolumeWidget(QWidget):
             )
             return
 
-        # Load the .mha file into a MhaVolume container (no reconstruction yet).
+        # Load the .mha file into a MhaVolume container (no geometry build yet).
         try:
             self._mha_volume = self._mha_reader.read(volfile_path, use_memmap=True)
         except ValueError as exc:
@@ -460,16 +461,16 @@ class VolumeWidget(QWidget):
         # Configure the slider range based on the loaded volume dtype.
         self._configure_threshold_slider_for_volume(self._mha_volume)
 
-        # Build a reconstructor and worker tied to this volume.
-        self._reconstructor = VolumeReconstructor(self._mha_volume)
-        self._reconstruct_worker = VolumeReconstructWorker(
-            self._reconstruct_proxy,
-            self._reconstructor,
+        # Build a geometry builder and worker tied to this volume.
+        self._geometry_builder = MhaVolumeGeometryBuilder(self._mha_volume)
+        self._build_geometry_worker = VolumeBuildGeometryWorker(
+            self._build_geometry_proxy,
+            self._geometry_builder,
         )
 
-        # Kick off an initial reconstruction using the current slider value.
+        # Kick off an initial geometry build using the current slider value.
         self._pending_threshold = int(self.ui.horizontalSlider_volume_threshold.value())
-        self._start_reconstruction(self._pending_threshold)
+        self._start_build_geometry(self._pending_threshold)
 
     # Summary:
     # - Configure the threshold slider range based on the loaded volume dtype.
@@ -510,20 +511,20 @@ class VolumeWidget(QWidget):
             self._pending_threshold = int(default_value)
 
     # Summary:
-    # - Start a background reconstruction request with a new generation id.
+    # - Start a background geometry build request with a new generation id.
     # - Input: `self`, `threshold` (int).
     # - Returns: None.
-    def _start_reconstruction(self, threshold: int) -> None:
+    def _start_build_geometry(self, threshold: int) -> None:
         # Do not start work until a volume and worker are ready.
-        if self._reconstructor is None or self._reconstruct_worker is None:
+        if self._geometry_builder is None or self._build_geometry_worker is None:
             return
 
         # Increment the generation counter so stale results are ignored.
-        self._reconstruct_request_id += 1
-        request_id = self._reconstruct_request_id
+        self._build_geometry_request_id += 1
+        request_id = self._build_geometry_request_id
 
-        # Thread start: run reconstruction off the UI thread.
-        self._reconstruct_worker.start(
+        # Thread start: run geometry building off the UI thread.
+        self._build_geometry_worker.start(
             float(threshold),
             self._max_points,
             request_id,
@@ -547,23 +548,23 @@ class VolumeWidget(QWidget):
         # Avoid starting work before a volume has been loaded.
         if self._mha_volume is None:
             return
-        # Start a reconstruction using the most recent slider value.
-        self._start_reconstruction(self._pending_threshold)
+        # Start a geometry build using the most recent slider value.
+        self._start_build_geometry(self._pending_threshold)
 
     # Summary:
-    # - Slot function that applies reconstruction results to the scatter plot.
-    # - Input: `self`, `result` (ReconstructionResult), `request_id` (int).
+    # - Slot function that applies geometry-building results to the scatter plot.
+    # - Input: `self`, `result` (GeometryBuildingResult), `request_id` (int).
     # - Returns: None.
-    def _on_volumeReconstructProxy_result_ready(
+    def _on_volumeBuildGeometryProxy_result_ready(
         self,
-        result: ReconstructionResult,
+        result: GeometryBuildingResult,
         request_id: int,
     ) -> None:
         # Ignore stale results when a newer request has been issued.
-        if request_id != self._reconstruct_request_id:
+        if request_id != self._build_geometry_request_id:
             return
 
-        # Update the scatter plot with the latest reconstructed points.
+        # Update the scatter plot with the latest geometry points.
         self._volume_canvas.update_points(
             result.points_xyz,
             result.intensities,

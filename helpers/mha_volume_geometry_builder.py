@@ -24,12 +24,12 @@ DEFAULT_CHUNK_DEPTH = 4
 
 
 # Summary:
-# - Lightweight container for reconstructed volume point clouds.
+# - Lightweight container for volume geometry samples.
 # - What it does: stores world-space points, their intensities, and axis-aligned bounds.
 @dataclass
-class ReconstructionResult:
+class GeometryBuildingResult:
     # World coordinates for each sampled voxel center, shaped (N, 3).
-    # - Input: produced by VolumeReconstructor after applying the cached affine.
+    # - Input: produced by MhaVolumeGeometryBuilder after applying the cached affine.
     # - Returns: numpy array of floats for plotting or downstream computation.
     points_xyz: np.ndarray
 
@@ -50,15 +50,15 @@ class ReconstructionResult:
 
 
 # Summary:
-# - Compute-only helper that reconstructs voxel points from a MhaVolume.
+# - Compute-only helper that builds geometry samples from a MhaVolume.
 # - What it does: samples above-threshold voxels, applies the cached affine, and returns a result.
-class VolumeReconstructor:
+class MhaVolumeGeometryBuilder:
     # Summary:
-    # - Initialize the reconstructor with an optional volume.
+    # - Initialize the geometry builder with an optional volume.
     # - Input: `self`, `mha_volume` (MhaVolume | None).
     # - Returns: None.
     def __init__(self, mha_volume: Optional[MhaVolume] = None) -> None:
-        # Store the active volume so reconstruct() can reuse it.
+        # Store the active volume so build_geometry() can reuse it.
         self._mha_volume: Optional[MhaVolume] = None
         # Cache the affine matrix so slider changes do not rebuild it.
         self._affine: Optional[np.ndarray] = None
@@ -74,7 +74,7 @@ class VolumeReconstructor:
     # - Input: `self`, `mha_volume` (MhaVolume | None).
     # - Returns: None.
     def set_volume(self, mha_volume: Optional[MhaVolume]) -> None:
-        # Store the volume so reconstruct() can reuse it later.
+        # Store the volume so build_geometry() can reuse it later.
         self._mha_volume = mha_volume
 
         if mha_volume is None:
@@ -84,19 +84,19 @@ class VolumeReconstructor:
 
         # Normalize metadata to stable float arrays before building the affine.
         rotation, spacing, offset, center = self._normalize_metadata(mha_volume)
-        # Cache the affine so reconstruction is just a matrix multiply.
+        # Cache the affine so geometry building is just a matrix multiply.
         self._affine = self._build_affine(rotation, spacing, offset, center)
 
     # Summary:
-    # - Reconstruct above-threshold voxels into a point cloud with optional sampling.
+    # - Build geometry samples from above-threshold voxels with optional sampling.
     # - Input: `self`, `threshold` (float), `max_points` (int), `mode` (str).
-    # - Returns: ReconstructionResult.
-    def reconstruct(
+    # - Returns: GeometryBuildingResult.
+    def build_geometry(
         self,
         threshold: float = DEFAULT_THRESHOLD,
         max_points: int = DEFAULT_MAX_POINTS,
         mode: str = "preview",
-    ) -> ReconstructionResult:
+    ) -> GeometryBuildingResult:
         # Ignore mode for now; it is reserved for future quality levels.
         _ = mode
 
@@ -188,7 +188,7 @@ class VolumeReconstructor:
         min_xyz = points_xyz.min(axis=0)
         max_xyz = points_xyz.max(axis=0)
 
-        return ReconstructionResult(
+        return GeometryBuildingResult(
             points_xyz=points_xyz,
             intensities=sample_intensities,
             min_xyz=min_xyz,
@@ -320,12 +320,12 @@ class VolumeReconstructor:
     # Summary:
     # - Build a consistent empty result for early exits.
     # - Input: `self`.
-    # - Returns: ReconstructionResult with empty arrays and None bounds.
-    def _empty_result(self) -> ReconstructionResult:
+    # - Returns: GeometryBuildingResult with empty arrays and None bounds.
+    def _empty_result(self) -> GeometryBuildingResult:
         # Keep shapes consistent so UI updates can be simplified.
         empty_points = np.empty((0, 3), dtype=np.float64)
         empty_intensities = np.empty((0,), dtype=np.float32)
-        return ReconstructionResult(
+        return GeometryBuildingResult(
             points_xyz=empty_points,
             intensities=empty_intensities,
             min_xyz=None,
