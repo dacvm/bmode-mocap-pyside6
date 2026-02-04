@@ -4,26 +4,16 @@
 import os
 import tempfile
 import threading
-from datetime import datetime
 from typing import Optional
 
 # Third-party imports for plotting and numeric helpers.
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PySide6.QtCore import QObject, QProcess, Qt, Signal, QTimer
-from PySide6.QtGui import QTextCursor
+from PySide6.QtCore import QObject, Qt, Signal, QTimer
 
 # Qt widgets for the main window and file dialogs.
-from PySide6.QtWidgets import (
-    QApplication,
-    QDialog,
-    QFileDialog,
-    QMessageBox,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 # Generated UI class from Qt Designer (do not edit the _ui.py file).
 from volume_ui import Ui_Form as Ui_Volume
@@ -36,6 +26,8 @@ from helpers.mha_volume_geometry_builder import (
     GeometryBuildingResult,
     MhaVolumeGeometryBuilder,
 )
+from helpers.volume_reconstruction_logdialog import VolumeReconstructionLogDialog
+from helpers.volume_reconstruction_runner import VolumeReconstructionRunner
 
 DEFAULT_CONFIG_FILE = (
     "configs/PlusDeviceSet_fCal_Epiphan_NDIPolaris_RadboudUMC_20241219_150400.xml"
@@ -44,10 +36,6 @@ DEFAULT_SEQUENCE_FILE = "seqs/SequenceRecording_2024-12-20_14-47-41.mha"
 DEFAULT_OUTPUT_DIR = "seqs/"
 DEFAULT_VOLUME_FILE = "seqs/VolumeOutput_2024-12-20_14-48-05.mha"
 VOLUME_THRESHOLD_DEBOUNCE_MS = 100
-DEFAULT_VOLUME_RECONSTRUCTOR_EXE = "C:/Users/DennisChristie/PlusApp-2.9.0.20240320-Win64/bin/VolumeReconstructor.exe"
-VOLUME_RECONSTRUCTOR_EXE_ENV = "PLUS_VOLUME_RECONSTRUCTOR_EXE"
-RECON_OUTPUT_BUFFER_LIMIT = 8000
-RECON_LOG_TEXT_LIMIT = 25000
 
 
 # Summary:
@@ -317,17 +305,35 @@ class VolumeWidget(QWidget):
         # Generation counter so stale worker results are ignored.
         self._build_geometry_request_id = 0
 
-        # Track the external reconstruction process state and diagnostics.
-        self._recon_process: Optional[QProcess] = None
-        self._recon_state = "idle"
-        self._recon_output_path = ""
-        self._recon_stdout = ""
-        self._recon_stderr = ""
-        # Track the temporary reconstruction log dialog and its line buffers.
-        self._recon_log_dialog: Optional[QDialog] = None
-        self._recon_log_text: Optional[QTextEdit] = None
-        self._recon_stdout_line_buffer = ""
-        self._recon_stderr_line_buffer = ""
+        # Build the reconstruction runner that owns the QProcess lifecycle.
+        self._recon_runner = VolumeReconstructionRunner(parent=self)
+        # Build the reconstruction log dialog for streaming output text.
+        self._recon_log_dialog = VolumeReconstructionLogDialog(parent=self)
+
+        # Signal connection: update UI state when reconstruction starts.
+        self._recon_runner.sig_started.connect(
+            self._on_volumeReconstructionRunner_started
+        )
+        # Signal connection: stream stdout into the log dialog.
+        self._recon_runner.sig_stdout.connect(
+            self._on_volumeReconstructionRunner_stdout
+        )
+        # Signal connection: stream stderr into the log dialog.
+        self._recon_runner.sig_stderr.connect(
+            self._on_volumeReconstructionRunner_stderr
+        )
+        # Signal connection: load the output volume after a successful run.
+        self._recon_runner.sig_succeeded.connect(
+            self._on_volumeReconstructionRunner_succeeded
+        )
+        # Signal connection: warn the user when reconstruction fails.
+        self._recon_runner.sig_failed.connect(
+            self._on_volumeReconstructionRunner_failed
+        )
+        # Signal connection: reset UI after a manual stop.
+        self._recon_runner.sig_stopped.connect(
+            self._on_volumeReconstructionRunner_stopped
+        )
 
     # Summary:
     # - Resolve a safe starting path for file dialogs.
@@ -746,252 +752,14 @@ class VolumeWidget(QWidget):
         return config_path, seq_path, out_dir
 
     # Summary:
-    # - Build a unique output volume file path inside the output folder.
-    # - Input: `self`, `out_dir` (str).
-    # - Returns: Unique output file path (str).
-    def _make_unique_output_volume_path(self, out_dir: str) -> str:
-        # Use a timestamped base name so each run keeps its own output.
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        base_name = f"VolumeOutput_{timestamp}"
-        candidate = os.path.join(out_dir, f"{base_name}.mha")
-
-        # If a file exists, append a numeric suffix until we find a free name.
-        counter = 1
-        while os.path.exists(candidate):
-            candidate = os.path.join(out_dir, f"{base_name}_{counter}.mha")
-            counter += 1
-
-        # Track the output path so finish handlers know where to load from.
-        self._recon_output_path = candidate
-        return candidate
-
-    # Summary:
-    # - Ensure the reconstruction output log dialog exists and is visible.
-    # - Input: `self`.
-    # - Returns: None.
-    def _open_recon_log_dialog(self) -> None:
-        # Create the dialog only once per run so we can update it as output streams in.
-        if self._recon_log_dialog is None:
-            dialog = QDialog(self)
-            dialog.setObjectName("volumeReconLogDialog")
-            # UI state change: label the dialog so users know what it shows.
-            dialog.setWindowTitle("Volume Reconstruction Output")
-            dialog.setModal(False)
-            dialog.setWindowModality(Qt.NonModal)
-            dialog.resize(600, 150)
-
-            layout = QVBoxLayout(dialog)
-            text_edit = QTextEdit(dialog)
-            text_edit.setObjectName("volumeReconLogTextEdit")
-            # UI state change: keep the log view read-only.
-            text_edit.setReadOnly(True)
-            text_edit.setLineWrapMode(QTextEdit.NoWrap)
-            layout.addWidget(text_edit)
-            dialog.setLayout(layout)
-
-            # Signal connection: track when the user closes the dialog.
-            dialog.finished.connect(self._on_volumeReconLogDialog_finished)
-
-            self._recon_log_dialog = dialog
-            self._recon_log_text = text_edit
-
-        # UI state change: clear old text before showing a new run.
-        self._reset_recon_log_state()
-
-        # UI state change: show the dialog non-modally and bring it to the front.
-        self._recon_log_dialog.show()
-        self._recon_log_dialog.raise_()
-        self._recon_log_dialog.activateWindow()
-
-    # Summary:
-    # - Close the reconstruction log dialog if it is open.
-    # - Input: `self`.
-    # - Returns: None.
-    def _close_recon_log_dialog(self) -> None:
-        # UI state change: close the dialog so it disappears after finishing.
-        if self._recon_log_dialog is None:
-            return
-        # Use done() so the dialog emits finished and we can clean references.
-        self._recon_log_dialog.done(0)
-
-    # Summary:
-    # - Reset reconstruction log buffers and clear the log text view.
-    # - Input: `self`.
-    # - Returns: None.
-    def _reset_recon_log_state(self) -> None:
-        # Clear partial line buffers so line-by-line output starts clean.
-        self._recon_stdout_line_buffer = ""
-        self._recon_stderr_line_buffer = ""
-
-        # UI state change: clear the visible log when the dialog exists.
-        if self._recon_log_text is not None:
-            self._recon_log_text.clear()
-
-    # Summary:
-    # - Append reconstruction output to the log dialog line-by-line.
-    # - Input: `self`, `text` (str), `is_stderr` (bool).
-    # - Returns: None.
-    def _append_recon_log_output(self, text: str, is_stderr: bool) -> None:
-        if not text:
-            return
-
-        # Keep partial lines so we only append complete lines to the UI.
-        if is_stderr:
-            pending = self._recon_stderr_line_buffer
-        else:
-            pending = self._recon_stdout_line_buffer
-
-        combined = pending + text
-        lines = combined.splitlines(keepends=True)
-        new_buffer = ""
-
-        # Append only complete lines to keep the log readable line-by-line.
-        for line in lines:
-            if line.endswith("\n") or line.endswith("\r"):
-                clean_line = line.rstrip("\r\n")
-                if self._recon_log_text is not None:
-                    prefix = "[stderr] " if is_stderr else ""
-                    self._recon_log_text.append(f"{prefix}{clean_line}")
-            else:
-                new_buffer = line
-
-        # Store any trailing partial line for the next read.
-        if is_stderr:
-            self._recon_stderr_line_buffer = new_buffer
-        else:
-            self._recon_stdout_line_buffer = new_buffer
-
-        # UI state change: keep the log scrolled to the newest output.
-        if self._recon_log_text is not None:
-            self._recon_log_text.moveCursor(QTextCursor.End)
-            self._trim_recon_log_text()
-
-    # Summary:
-    # - Trim the log dialog text to a maximum character count.
-    # - Input: `self`.
-    # - Returns: None.
-    def _trim_recon_log_text(self) -> None:
-        # Guard against trimming when the dialog is not visible.
-        if self._recon_log_text is None:
-            return
-
-        document = self._recon_log_text.document()
-        current_count = document.characterCount()
-        if current_count <= RECON_LOG_TEXT_LIMIT:
-            return
-
-        # Remove the oldest characters so the log does not grow unbounded.
-        excess = current_count - RECON_LOG_TEXT_LIMIT
-        cursor = QTextCursor(document)
-        cursor.movePosition(QTextCursor.Start)
-        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, excess)
-        cursor.removeSelectedText()
-
-    # Summary:
-    # - Slot function that handles the log dialog being closed.
-    # - Input: `self`, `result` (int).
-    # - Returns: None.
-    def _on_volumeReconLogDialog_finished(self, result: int) -> None:
-        # This is a slot function for dialog close events.
-        _ = result
-        if self._recon_log_dialog is None:
-            return
-
-        # Allow reconstruction to continue; just drop UI references.
-        self._recon_log_dialog.deleteLater()
-        self._recon_log_dialog = None
-        self._recon_log_text = None
-
-    # Summary:
-    # - Start the external reconstruction process asynchronously.
-    # - Input: `self`, `config_path` (str), `seq_path` (str), `out_dir` (str).
-    # - Returns: None.
-    def _start_reconstruct(self, config_path: str, seq_path: str, out_dir: str) -> None:
-        # Prefer an environment override so deployments can set the executable location.
-        env_override = os.getenv(VOLUME_RECONSTRUCTOR_EXE_ENV)
-        exe_path = env_override.strip() if env_override else DEFAULT_VOLUME_RECONSTRUCTOR_EXE
-        exe_path = os.path.abspath(exe_path)
-
-        # Validation: ensure the executable exists before we try to start it.
-        if not os.path.isfile(exe_path):
-            QMessageBox.warning(
-                self,
-                "Reconstructor Not Found",
-                f"The executable was not found:\n{exe_path}",
-            )
-            return
-
-        # Build a unique output path for this reconstruction run.
-        output_path = self._make_unique_output_volume_path(out_dir)
-
-        # Reset diagnostic buffers so each run has clean logs.
-        self._recon_stdout = ""
-        self._recon_stderr = ""
-
-        # UI state change: open the live log dialog for this reconstruction run.
-        self._open_recon_log_dialog()
-
-        # Create a fresh QProcess so signals are scoped to this run.
-        self._recon_process = QProcess(self)
-        self._recon_process.setObjectName("volumeReconstructProcess")
-
-        # Signal connection: append stdout to the diagnostics buffer.
-        self._recon_process.readyReadStandardOutput.connect(
-            self._on_volumeReconstructProcess_stdout_ready
-        )
-        # Signal connection: append stderr to the diagnostics buffer.
-        self._recon_process.readyReadStandardError.connect(
-            self._on_volumeReconstructProcess_stderr_ready
-        )
-        # Signal connection: handle process-level errors (start/crash).
-        self._recon_process.errorOccurred.connect(
-            self._on_volumeReconstructProcess_error_occurred
-        )
-        # Signal connection: handle process completion and load the output.
-        self._recon_process.finished.connect(
-            self._on_volumeReconstructProcess_finished
-        )
-
-        # Build the arguments exactly as expected by the CLI tool.
-        arguments = [
-            f"--config-file={config_path}",
-            f"--source-seq-file={seq_path}",
-            f"--output-volume-file={output_path}",
-            "--image-to-reference-transform=ImageToReference",
-            "--disable-compression",
-        ]
-
-        # UI state change: lock inputs while the external process runs.
-        self._set_recon_ui_running(True)
-        # Track the running state so the button can stop the process.
-        self._recon_state = "running"
-
-        # Async start: launch the process without blocking the UI thread.
-        self._recon_process.start(exe_path, arguments)
-
-    # Summary:
-    # - Request the running reconstruction process to stop.
-    # - Input: `self`.
-    # - Returns: None.
-    def _stop_reconstruct(self) -> None:
-        # Guard against stop requests when no process exists.
-        if self._recon_process is None:
-            return
-        # Guard against stop requests when the process already exited.
-        if self._recon_process.state() == QProcess.NotRunning:
-            return
-        # Async stop: request termination without blocking the UI.
-        self._recon_process.terminate()
-
-    # Summary:
     # - Slot function that starts or stops the reconstruction process.
     # - Input: `self`.
     # - Returns: None.
     def _on_pushButton_volume_reconstruct_clicked(self) -> None:
         # Toggle behavior: stop when running, start when idle.
-        if self._recon_state == "running":
+        if self._recon_runner.is_running():
             # User intent: stop the external process if it is running.
-            self._stop_reconstruct()
+            self._recon_runner.stop()
             return
 
         # Validate inputs before starting the external tool.
@@ -1001,165 +769,88 @@ class VolumeWidget(QWidget):
 
         config_path, seq_path, out_dir = inputs
         # Start reconstruction asynchronously using the validated inputs.
-        self._start_reconstruct(config_path, seq_path, out_dir)
+        self._recon_runner.start_reconstruct(config_path, seq_path, out_dir)
 
     # Summary:
-    # - Slot function that buffers reconstruction stdout output.
+    # - Slot function that updates the UI when reconstruction starts.
     # - Input: `self`.
     # - Returns: None.
-    def _on_volumeReconstructProcess_stdout_ready(self) -> None:
-        # Guard against signals firing after cleanup.
-        if self._recon_process is None:
-            return
-
-        # Read any available stdout bytes from the process.
-        data = self._recon_process.readAllStandardOutput()
-        if not data:
-            return
-
-        # Decode and append so we can show diagnostics on failure.
-        text = bytes(data).decode(errors="replace")
-        self._recon_stdout += text
-
-        # UI update: stream stdout into the live log dialog.
-        self._append_recon_log_output(text, is_stderr=False)
-
-        # Keep only the latest chunk to avoid unbounded memory growth.
-        if len(self._recon_stdout) > RECON_OUTPUT_BUFFER_LIMIT:
-            self._recon_stdout = self._recon_stdout[-RECON_OUTPUT_BUFFER_LIMIT:]
+    def _on_volumeReconstructionRunner_started(self) -> None:
+        # This is a slot function for reconstruction start signals.
+        # UI state change: lock inputs while the external process runs.
+        self._set_recon_ui_running(True)
+        # UI state change: open the live log dialog for this reconstruction run.
+        self._recon_log_dialog.start_new_run()
 
     # Summary:
-    # - Slot function that buffers reconstruction stderr output.
-    # - Input: `self`.
+    # - Slot function that streams reconstruction stdout into the log dialog.
+    # - Input: `self`, `text` (str).
     # - Returns: None.
-    def _on_volumeReconstructProcess_stderr_ready(self) -> None:
-        # Guard against signals firing after cleanup.
-        if self._recon_process is None:
-            return
-
-        # Read any available stderr bytes from the process.
-        data = self._recon_process.readAllStandardError()
-        if not data:
-            return
-
-        # Decode and append so we can show diagnostics on failure.
-        text = bytes(data).decode(errors="replace")
-        self._recon_stderr += text
-
-        # UI update: stream stderr into the live log dialog.
-        self._append_recon_log_output(text, is_stderr=True)
-
-        # Keep only the latest chunk to avoid unbounded memory growth.
-        if len(self._recon_stderr) > RECON_OUTPUT_BUFFER_LIMIT:
-            self._recon_stderr = self._recon_stderr[-RECON_OUTPUT_BUFFER_LIMIT:]
+    def _on_volumeReconstructionRunner_stdout(self, text: str) -> None:
+        # This is a slot function for reconstruction stdout signals.
+        # UI update: append stdout to the log dialog.
+        self._recon_log_dialog.append_stdout(text)
 
     # Summary:
-    # - Slot function that handles reconstruction process errors.
-    # - Input: `self`, `process_error` (QProcess.ProcessError).
+    # - Slot function that streams reconstruction stderr into the log dialog.
+    # - Input: `self`, `text` (str).
     # - Returns: None.
-    def _on_volumeReconstructProcess_error_occurred(
-        self, process_error: QProcess.ProcessError
-    ) -> None:
-        # Normalize state first so the UI is re-enabled even on early failures.
-        self._recon_state = "idle"
+    def _on_volumeReconstructionRunner_stderr(self, text: str) -> None:
+        # This is a slot function for reconstruction stderr signals.
+        # UI update: append stderr to the log dialog.
+        self._recon_log_dialog.append_stderr(text)
+
+    # Summary:
+    # - Slot function that handles successful reconstruction completion.
+    # - Input: `self`, `output_path` (str).
+    # - Returns: None.
+    def _on_volumeReconstructionRunner_succeeded(self, output_path: str) -> None:
+        # This is a slot function for reconstruction success signals.
+        # UI state change: restore inputs now that the process ended.
         self._set_recon_ui_running(False)
-        # UI state change: close the live log dialog when the process errors out.
-        self._close_recon_log_dialog()
-
-        # Collect diagnostics to help the user debug failed starts.
-        exe_path = ""
-        error_text = "Unknown error"
-        if self._recon_process is not None:
-            exe_path = self._recon_process.program()
-            error_text = self._recon_process.errorString()
-
-        stderr_tail = self._recon_stderr[-RECON_OUTPUT_BUFFER_LIMIT:]
-        if not stderr_tail:
-            stderr_tail = "(no stderr captured)"
-
-        # UI state change: show a warning with the process error details.
-        QMessageBox.warning(
-            self,
-            "Reconstruction Error",
-            "\n".join(
-                [
-                    f"Executable: {exe_path}",
-                    f"Error: {process_error} ({error_text})",
-                    "Stderr (tail):",
-                    stderr_tail,
-                ]
-            ),
-        )
-
-        # Cleanup: release the process object after handling the error.
-        self._cleanup_recon_process()
-
-    # Summary:
-    # - Slot function that handles reconstruction completion.
-    # - Input: `self`, `exit_code` (int), `exit_status` (QProcess.ExitStatus).
-    # - Returns: None.
-    def _on_volumeReconstructProcess_finished(
-        self, exit_code: int, exit_status: QProcess.ExitStatus
-    ) -> None:
-        # Guard against double handling after an error cleanup.
-        if self._recon_process is None:
-            return
-
-        # Restore UI state regardless of success or failure.
-        self._recon_state = "idle"
-        self._set_recon_ui_running(False)
-        # UI state change: close the live log dialog now that the process ended.
-        self._close_recon_log_dialog()
-
-        # Validate normal exit before attempting to load outputs.
-        if exit_status != QProcess.NormalExit or exit_code != 0:
-            stderr_tail = self._recon_stderr[-RECON_OUTPUT_BUFFER_LIMIT:]
-            if not stderr_tail:
-                stderr_tail = "(no stderr captured)"
-            QMessageBox.warning(
-                self,
-                "Reconstruction Failed",
-                "\n".join(
-                    [
-                        f"Exit status: {exit_status}",
-                        f"Exit code: {exit_code}",
-                        "Stderr (tail):",
-                        stderr_tail,
-                    ]
-                ),
-            )
-            self._cleanup_recon_process()
-            return
-
-        output_path = self._recon_output_path
-        if not output_path or not os.path.isfile(output_path):
-            QMessageBox.warning(
-                self,
-                "Output Missing",
-                f"The output volume file was not found:\n{output_path}",
-            )
-            self._cleanup_recon_process()
-            return
-
-        # UI state change: show the new output path in the volume line edit.
+        # UI state change: show the output path in the volume line edit.
         self.ui.lineEdit_volume_volfile.setText(output_path)
         # Load and display the output volume using the existing pipeline.
         self._load_and_display_volume(output_path)
-
-        # Cleanup: release the process object once we have handled the output.
-        self._cleanup_recon_process()
+        # UI state change: mark the log dialog as finished.
+        self._recon_log_dialog.finish_run()
 
     # Summary:
-    # - Cleanup the reconstruction QProcess to avoid stale signal emissions.
+    # - Slot function that handles reconstruction failures.
+    # - Input: `self`, `message` (str).
+    # - Returns: None.
+    def _on_volumeReconstructionRunner_failed(self, message: str) -> None:
+        # This is a slot function for reconstruction failure signals.
+        # UI state change: restore inputs after the failure.
+        self._set_recon_ui_running(False)
+        # UI state change: show a warning with failure details.
+        QMessageBox.warning(self, "Reconstruction Failed", message)
+        # UI state change: mark the log dialog as finished.
+        self._recon_log_dialog.finish_run()
+
+    # Summary:
+    # - Slot function that handles user-requested reconstruction stops.
     # - Input: `self`.
     # - Returns: None.
-    def _cleanup_recon_process(self) -> None:
-        # Guard against cleanup when the process is already cleared.
-        if self._recon_process is None:
-            return
-        # Allow Qt to delete the process safely on the event loop.
-        self._recon_process.deleteLater()
-        self._recon_process = None
+    def _on_volumeReconstructionRunner_stopped(self) -> None:
+        # This is a slot function for reconstruction stop signals.
+        # UI state change: restore inputs after stopping.
+        self._set_recon_ui_running(False)
+        # UI state change: mark the log dialog as finished.
+        self._recon_log_dialog.finish_run()
+
+    # Summary:
+    # - Handle widget close events and stop active reconstruction safely.
+    # - Input: `self`, `event` (QCloseEvent).
+    # - Returns: None.
+    def closeEvent(self, event) -> None:
+        # If a reconstruction is running, request a stop before closing.
+        if self._recon_runner.is_running():
+            self._recon_runner.stop()
+        # UI state change: hide the log dialog so it does not linger.
+        self._recon_log_dialog.close_dialog()
+        # Allow the default close behavior to proceed.
+        super().closeEvent(event)
 
 
 # Summary:
