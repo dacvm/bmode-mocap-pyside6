@@ -187,7 +187,26 @@ class MhaReader:
                     f"file_size={file_size})"
                 )
 
-            # Build a shape where X is the last axis so it is fastest in C-order.
+            # Build a numpy shape that matches how the 1D payload is linearized in the file.
+            #
+            # IMPORTANT CONTEXT (junior-friendly):
+            # - The .mha header reports `DimSize` in "header order": (x, y, z, ...).
+            # - The binary payload that follows the header is a flat 1D byte stream.
+            # - For images/volumes, the most common convention for that 1D stream is:
+            #     walk along X first (x changes fastest), then Y, then Z.
+            #
+            # - NumPy's default `reshape(...)` uses C-order (row-major), meaning:
+            #     the LAST axis changes fastest in memory.
+            #
+            # So, to interpret the 1D payload correctly *without copying/reordering bytes*,
+            # we intentionally reshape into (z, y, x) so that X becomes the last axis.
+            #
+            # Why keep (z, y, x) in Python?
+            # - 2D images are usually addressed as (y, x) == (row, col) in NumPy.
+            # - Extending that to 3D volumes naturally becomes (z, y, x):
+            #     `data[z]` gives a 2D slice shaped (y, x) that is easy to display/process.
+            # - With X as the last axis, scanning across a row in an image/slice is contiguous,
+            #   which is typically faster for NumPy operations (and matches file layout).
             shape_spatial = tuple(reversed(dim_size_xyz))
             if channels == 1:
                 shape = shape_spatial
