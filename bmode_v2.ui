@@ -15,7 +15,7 @@
   </property>
   <layout class="QHBoxLayout" name="horizontalLayout_3">
    <item>
-    <layout class="QHBoxLayout" name="horizontalLayout_bmode" stretch="1,3">
+    <layout class="QHBoxLayout" name="horizontalLayout_bmode" stretch="2,3">
      <item>
       <layout class="QVBoxLayout" name="verticalLayout_bmode_menu">
        <item>
@@ -52,10 +52,10 @@
          <item>
           <widget class="QLineEdit" name="lineEdit_bmode_calibPath">
            <property name="enabled">
-            <bool>false</bool>
+            <bool>true</bool>
            </property>
            <property name="placeholderText">
-            <string>D:/</string>
+            <string>~/config.xml</string>
            </property>
           </widget>
          </item>
@@ -95,17 +95,45 @@
         </widget>
        </item>
        <item>
-        <spacer name="verticalSpacer_bmode_menu">
-         <property name="orientation">
-          <enum>Qt::Orientation::Vertical</enum>
+        <widget class="QPlainTextEdit" name="plainTextEdit_bmode_textStream"/>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_bmode_recorddir">
+         <item>
+          <widget class="QLineEdit" name="lineEdit_bmode_recorddir">
+           <property name="placeholderText">
+            <string>~/output/</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="pushButton_bmode_recorddirClear">
+           <property name="text">
+            <string/>
+           </property>
+           <property name="icon">
+            <iconset theme="QIcon::ThemeIcon::EditClear"/>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="pushButton_bmode_recorddirBrowse">
+           <property name="text">
+            <string>Record Dir</string>
+           </property>
+           <property name="icon">
+            <iconset theme="QIcon::ThemeIcon::FolderOpen"/>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QPushButton" name="pushButton_bmode_recordStream">
+         <property name="text">
+          <string>Record</string>
          </property>
-         <property name="sizeHint" stdset="0">
-          <size>
-           <width>20</width>
-           <height>40</height>
-          </size>
-         </property>
-        </spacer>
+        </widget>
        </item>
       </layout>
      </item>

@@ -15,7 +15,7 @@
   </property>
   <layout class="QHBoxLayout" name="horizontalLayout_2">
    <item>
-    <layout class="QHBoxLayout" name="horizontalLayout_mocap" stretch="0,2">
+    <layout class="QHBoxLayout" name="horizontalLayout_mocap" stretch="2,3">
      <item>
       <layout class="QVBoxLayout" name="verticalLayout_mocap_menu" stretch="0,0,0,0,0">
        <item>
@@ -68,7 +68,7 @@
          <item>
           <widget class="QLineEdit" name="lineEdit_mocap_recorddir">
            <property name="placeholderText">
-            <string>D:\</string>
+            <string>~/output/</string>
            </property>
           </widget>
          </item>
@@ -95,7 +95,7 @@
         </layout>
        </item>
        <item>
-        <widget class="QPushButton" name="pushButton_mocap_recordStream">
+        <widget class="QPushButton" name="pushButton_mocap_record">
          <property name="text">
           <string>Record</string>
          </property>
