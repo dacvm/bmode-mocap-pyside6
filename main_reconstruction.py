@@ -3,16 +3,24 @@
 # Standard library helpers for filesystem normalization and app exit codes.
 import os
 import sys
+from typing import Optional
 
+# Qt core helpers for queued signal connections and typed slots.
+from PySide6.QtCore import Qt, Slot
 # Qt widgets for main window, dialogs, and message boxes.
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
+# Coupler that matches image and rigid body packets by timestamp.
+from coupled_stream_controller import CoupledStreamController
 # Generated UI class from Qt Designer (do not edit the generated file).
 from app_reconstruction_ui import Ui_MainWindow
 # Custom widgets that will be embedded into the main window layouts.
 from main_bmode import BModeWidget
 from main_mocap import MocapWidget
 from main_volume import VolumeWidget
+
+COUPLED_MAXDIFF_IMAGEPOSE_MS = 120
+COUPLED_MOCAP_BUFFER_MAXLEN = 500
 
 
 # Summary:
@@ -57,6 +65,16 @@ class MainWindow(QMainWindow):
         self.ui.label_status_bmode.setText("Disconnected")
         self.ui.label_status_mocap.setText("Disconnected")
 
+        # Track the latest debug values so one status line can show coupling health.
+        self._latest_coupled_diff_ms: Optional[int] = None
+        self._latest_coupler_stats: dict = {}
+
+        # Create the software coupler for image+pose sample-and-hold matching.
+        self._coupler = CoupledStreamController(
+            maxdiff_imagepose_ms=COUPLED_MAXDIFF_IMAGEPOSE_MS,
+            mocap_buffer_maxlen=COUPLED_MOCAP_BUFFER_MAXLEN,
+        )
+
         # Signal connection: mirror B-mode stream state into the reconstruction status label.
         self._bmode_widget._proxy.state_changed.connect(
             self._on_bmodeStreamProxy_state_changed
@@ -64,6 +82,26 @@ class MainWindow(QMainWindow):
         # Signal connection: mirror Mocap stream state into the reconstruction status label.
         self._mocap_widget._stream_proxy.state_changed.connect(
             self._on_mocapStreamProxy_state_changed
+        )
+        # Signal connection: forward image packets into the coupler on a queued connection.
+        self._bmode_widget.sig_image_packet.connect(
+            self._coupler.on_image_packet,
+            Qt.QueuedConnection,
+        )
+        # Signal connection: forward rigid body packets into the coupler on a queued connection.
+        self._mocap_widget.sig_rigidbody_packet.connect(
+            self._coupler.on_rigidbody_packet,
+            Qt.QueuedConnection,
+        )
+        # Signal connection: show coupled packet timing for debug visibility.
+        self._coupler.sig_coupled_packet.connect(
+            self._on_coupledStreamController_coupled_packet,
+            Qt.QueuedConnection,
+        )
+        # Signal connection: show coupling drop counters for debug visibility.
+        self._coupler.sig_stats.connect(
+            self._on_coupledStreamController_stats_updated,
+            Qt.QueuedConnection,
         )
 
         # Signal connection: browse for an output directory.
@@ -78,6 +116,8 @@ class MainWindow(QMainWindow):
         self.ui.pushButton_coupledrecord_recordStream.clicked.connect(
             self._on_pushButton_coupledrecord_recordStream_clicked
         )
+        # UI state change: initialize coupled debug line in the status bar.
+        self._update_coupled_debug_status()
 
     # Summary:
     # - Slot function for B-mode stream-state updates from the embedded B-mode widget.
@@ -95,6 +135,11 @@ class MainWindow(QMainWindow):
 
         # UI state change: restore idle state whenever B-mode streaming stops or fails.
         self.ui.label_status_bmode.setText("Disconnected")
+        # Stop coupled recording when one source drops so sessions stay valid.
+        if self._coupler.is_recording():
+            self._coupler.stop_recording()
+            # UI state change: restore record button text after forced stop.
+            self.ui.pushButton_coupledrecord_recordStream.setText("Record")
 
     # Summary:
     # - Slot function for mocap stream-state updates from the embedded mocap widget.
@@ -112,6 +157,80 @@ class MainWindow(QMainWindow):
 
         # UI state change: restore idle state whenever mocap streaming stops or fails.
         self.ui.label_status_mocap.setText("Disconnected")
+        # Stop coupled recording when one source drops so sessions stay valid.
+        if self._coupler.is_recording():
+            self._coupler.stop_recording()
+            # UI state change: restore record button text after forced stop.
+            self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+
+    # Summary:
+    # - Slot function for coupled packet events from the CoupledStreamController.
+    # - What it does: caches the latest diff and refreshes debug status text.
+    # - Input: `self`, `image_ts_ms` (int), `image_data` (object), `rigidbody_ts_ms` (int),
+    #   `rigidbody_data` (object), `diff_ms` (int).
+    # - Returns: None.
+    @Slot(int, object, int, object, int)
+    def _on_coupledStreamController_coupled_packet(
+        self,
+        image_ts_ms: int,
+        image_data: object,
+        rigidbody_ts_ms: int,
+        rigidbody_data: object,
+        diff_ms: int,
+    ) -> None:
+        # Avoid unused-parameter warnings while keeping full signal signature explicit.
+        _ = image_data
+        _ = rigidbody_data
+        _ = image_ts_ms
+        _ = rigidbody_ts_ms
+        # Cache the latest diff so status/debug text can show coupling quality.
+        self._latest_coupled_diff_ms = int(diff_ms)
+        self._update_coupled_debug_status()
+
+    # Summary:
+    # - Slot function for coupling stats updates from the CoupledStreamController.
+    # - What it does: caches the latest counters and refreshes debug status text.
+    # - Input: `self`, `stats` (dict).
+    # - Returns: None.
+    @Slot(dict)
+    def _on_coupledStreamController_stats_updated(self, stats: dict) -> None:
+        # Validation/transform: guard against unexpected payloads before caching.
+        if not isinstance(stats, dict):
+            return
+        self._latest_coupler_stats = dict(stats)
+        self._update_coupled_debug_status()
+
+    # Summary:
+    # - Rebuild the coupled-stream debug text in the status bar.
+    # - What it does: combines latest diff and counters so users can quickly verify coupling health.
+    # - Input: `self`.
+    # - Returns: None.
+    def _update_coupled_debug_status(self) -> None:
+        # Read stats with safe defaults so the message still renders before first packet.
+        count_coupled = int(self._latest_coupler_stats.get("count_coupled", 0))
+        count_dropped_no_pose = int(
+            self._latest_coupler_stats.get("count_dropped_no_pose", 0)
+        )
+        count_dropped_stale = int(
+            self._latest_coupler_stats.get("count_dropped_stale", 0)
+        )
+        is_recording = bool(self._latest_coupler_stats.get("is_recording", False))
+
+        # Render diff as "N/A" until the first coupled packet arrives.
+        if self._latest_coupled_diff_ms is None:
+            diff_text = "N/A"
+        else:
+            diff_text = f"{self._latest_coupled_diff_ms} ms"
+
+        # UI state change: show one compact debug line for coupling success and drop reasons.
+        state_text = "REC" if is_recording else "IDLE"
+        self.statusBar().showMessage(
+            "Coupled streaming "
+            f"[ {state_text} ] Diff = {diff_text} | "
+            f"Data coupled = {count_coupled} | "
+            f"Data dropped (no match) = {count_dropped_no_pose} | "
+            f"Data dropped (too old) = {count_dropped_stale}"
+        )
 
 
     # Summary:
@@ -146,12 +265,19 @@ class MainWindow(QMainWindow):
 
     # Summary:
     # - Slot function for the Record button.
-    # - What it does: Validates record directory and streaming status, then prints
-    #   the selected recording mode.
+    # - What it does: Toggles coupled recording, validates prerequisites on start,
+    #   and controls the CoupledStreamController recording gate.
     # - Input: `self`.
     # - Returns: None.
     def _on_pushButton_coupledrecord_recordStream_clicked(self) -> None:
         # Slot function: react to the Record button click.
+        # Toggle behavior: stop immediately if coupled recording is currently active.
+        if self._coupler.is_recording():
+            self._coupler.stop_recording()
+            # UI state change: restore button text when recording stops.
+            self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+            return
+
         # Validation: ensure a record directory is set before proceeding.
         record_dir = self.ui.lineEdit_coupledrecord_recorddir.text().strip()
         if not record_dir:
@@ -177,14 +303,30 @@ class MainWindow(QMainWindow):
         if not hasattr(self.ui, "radioButton_imagecsv") or not hasattr(
             self.ui, "radioButton_mha"
         ):
-            print("radio buttons not found in Ui_MainWindow")
+            QMessageBox.warning(
+                self,
+                "Record Mode Missing",
+                "Record mode controls are not available in the current UI.",
+            )
             return
 
-        # Emit the selected mode so downstream logic can be wired later.
+        # Derive selected mode for debug output while recorder writing is not implemented yet.
         if self.ui.radioButton_imagecsv.isChecked():
-            print("image+csv is selected")
+            selected_mode = "image + .csv"
         elif self.ui.radioButton_mha.isChecked():
-            print("mha is selected")
+            selected_mode = ".mha"
+        else:
+            selected_mode = "unknown"
+
+        # Start coupling session so incoming image packets produce coupled packets.
+        self._coupler.start_recording()
+        self._latest_coupled_diff_ms = None
+        # UI state change: show stop intent while coupled recording is active.
+        self.ui.pushButton_coupledrecord_recordStream.setText("Stop Recording")
+        # UI state change: provide immediate debug text for active mode/session.
+        self.statusBar().showMessage(
+            f"Coupled recording started ({selected_mode}). Waiting for coupled packets..."
+        )
 
     # Summary:
     # - Handle the main-window close event.
@@ -195,6 +337,11 @@ class MainWindow(QMainWindow):
         # UI state change: reset both labels during shutdown for deterministic final state.
         self.ui.label_status_bmode.setText("Disconnected")
         self.ui.label_status_mocap.setText("Disconnected")
+        # Stop coupling so queued packets are ignored during window teardown.
+        if self._coupler.is_recording():
+            self._coupler.stop_recording()
+        # UI state change: restore record button text on shutdown.
+        self.ui.pushButton_coupledrecord_recordStream.setText("Record")
 
         # Delegate to Qt's default close handling after local cleanup.
         super().closeEvent(event)

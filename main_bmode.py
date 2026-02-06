@@ -36,13 +36,14 @@ IMAGE_RECORD_DROP_RATE_THRESHOLD = 0.05
 
 
 # Summary:
-# - Build a UTC epoch timestamp in milliseconds for frame packets.
-# - What it does: Uses time.time() to produce an integer ms value that is safe for threading.
+# - Build a monotonic timestamp in milliseconds for frame packets.
+# - What it does: Uses `time.monotonic()` so image timestamps share the same stable
+#   clock source as mocap timestamps for software coupling.
 # - Input: None.
-# - Returns: Milliseconds since Unix epoch (int).
-def _utc_epoch_ms() -> int:
-    # Use time.time because it is lightweight and thread-safe for this use case.
-    return int(time.time() * 1000)
+# - Returns: Monotonic milliseconds (int).
+def _now_ms() -> int:
+    # Use a monotonic clock so timestamp deltas are stable if system time changes.
+    return int(time.monotonic() * 1000)
 
 
 # Summary:
@@ -206,7 +207,7 @@ class CameraStreamWorker:
 
                 # Package the frame so the UI thread can render safely.
                 packet = FramePacket(
-                    _utc_epoch_ms(),
+                    _now_ms(),
                     width,
                     height,
                     "rgb888",
@@ -372,7 +373,7 @@ class ScreenGrabWorker(QObject):
 
         # Emit the frame packet for UI rendering.
         packet = FramePacket(
-            _utc_epoch_ms(),
+            _now_ms(),
             qimg.width(),
             qimg.height(),
             "rgb888",
@@ -681,6 +682,8 @@ class ImageRecordWorker:
 # Returns: A QWidget subclass instance that can be shown in a QApplication.
 class BModeWidget(QWidget):
     """Lightweight window that simply renders the V2 form."""
+    # Signal: emit one image packet per received frame for downstream coupling.
+    sig_image_packet = Signal(int, object)
 
     # Summary: Initialize the window and connect UI signals.
     # What it does: Sets up the generated UI, prepares stream workers, and hooks buttons/combos to handlers.
@@ -703,6 +706,9 @@ class BModeWidget(QWidget):
 
         # Cache the most recent frame packet so the UI can render on a timer.
         self._latest_frame_packet: Optional[FramePacket] = None
+        # Cache the latest image packet fields for coupled stream consumers.
+        self._latest_image_ts_ms: Optional[int] = None
+        self._latest_image_data: Optional[object] = None
         # Track the current stream state to keep the open/stop button repeat-safe.
         self._is_streaming = False
 
@@ -1178,6 +1184,14 @@ class BModeWidget(QWidget):
     def _on_bmodeStreamProxy_frame_ready(self, packet: FramePacket) -> None:
         # Cache the packet so rendering can happen on the display timer.
         self._latest_frame_packet = packet
+        # Convert the FramePacket fields to the agreed image packet naming.
+        image_ts_ms = int(packet.timestamp_ms)
+        image_data = packet
+        # Cache the latest image packet for consumers that need pull-style access.
+        self._latest_image_ts_ms = image_ts_ms
+        self._latest_image_data = image_data
+        # Emit the packet so the coupling controller can match image+rigidbody samples.
+        self.sig_image_packet.emit(image_ts_ms, image_data)
         # Enqueue the frame for recording without blocking the UI thread.
         self._image_record_worker.handle_frame(packet)
 
@@ -1226,6 +1240,8 @@ class BModeWidget(QWidget):
         self._display_timer.stop()
         # Clear cached frame data so we do not display stale images.
         self._latest_frame_packet = None
+        self._latest_image_ts_ms = None
+        self._latest_image_data = None
         self.ui.label_bmode_image.clear()
 
     # Summary: Slot function that shows worker errors on the UI thread.
@@ -1335,6 +1351,8 @@ class BModeWidget(QWidget):
         self.ui.lineEdit_bmode_calibPath.setEnabled(True)
         # Clear cached frame data and the image label.
         self._latest_frame_packet = None
+        self._latest_image_ts_ms = None
+        self._latest_image_data = None
         self.ui.label_bmode_image.clear()
 
     # Summary: Handle the window close event.

@@ -37,6 +37,17 @@ RECORD_NAN = float("nan")
 
 
 # Summary:
+# - Build a monotonic timestamp in milliseconds for mocap packets.
+# - What it does: Uses `time.monotonic()` to keep rigid body timestamps on the same
+#   stable clock source as image timestamps used for coupling.
+# - Input: None.
+# - Returns: Monotonic milliseconds (int).
+def _now_ms() -> int:
+    # Use a monotonic clock so packet deltas stay valid if wall clock time changes.
+    return int(time.monotonic() * 1000)
+
+
+# Summary:
 # - Matplotlib canvas that renders a live 3D scatter plot for mocap body positions.
 # - What it does: owns the Figure, a 3D Axes, and a single scatter handle that is updated in place.
 class Mocap3DCanvas(FigureCanvas):
@@ -223,7 +234,7 @@ class Mocap3DCanvas(FigureCanvas):
 #   in a thread-safe way.
 class MocapStreamProxy(QObject):
     text_ready = Signal(str)
-    poses_ready = Signal(object)
+    poses_ready = Signal(int, object)
     state_changed = Signal(bool, str)
     record_message = Signal(str)
     record_stop = Signal(str)
@@ -1115,10 +1126,12 @@ class QtmStreamWorker:
         text = self._format_6d_residual_text(packet, body_names, result)
         # Build a stable pose mapping aligned with body_names for the plot.
         poses_qtm = self._extract_6d_poses(result, body_names)
+        # Timestamp the rigid body packet at PC-receive time for software coupling.
+        rigidbody_ts_ms = _now_ms()
         # Emit the text from the worker thread to the UI thread.
         self._safe_emit(self._proxy.text_ready.emit, text)
-        # Emit the poses from the worker thread to the UI thread.
-        self._safe_emit(self._proxy.poses_ready.emit, poses_qtm)
+        # Emit the timestamped rigid body packet from worker thread to UI thread.
+        self._safe_emit(self._proxy.poses_ready.emit, rigidbody_ts_ms, poses_qtm)
 
         # Forward the result to the recorder without touching any UI state.
         self._recorder.handle_6d_residual_result(result)
@@ -1130,6 +1143,9 @@ class QtmStreamWorker:
 # - What it ensures: the Qt UI never freezes (no blocking calls on the UI thread), and streaming/recording can
 #   be started and stopped repeatedly without restarting the application.
 class MocapWidget(QWidget):
+    # Signal: emit one rigid body packet per mocap update for downstream coupling.
+    sig_rigidbody_packet = Signal(int, object)
+
     # Summary:
     # - Initialize the UI and wire signal handlers for streaming control.
     # - Input: `self`.
@@ -1153,6 +1169,9 @@ class MocapWidget(QWidget):
 
         # Cache the latest QTM poses for the throttled plot updates.
         self._latest_poses_qtm: dict[str, Optional[np.ndarray]] = {}
+        # Cache the latest rigid body packet fields for coupled stream consumers.
+        self._latest_rigidbody_ts_ms: Optional[int] = None
+        self._latest_rigidbody_data: Optional[object] = None
 
         # Create a timer that redraws the plot at a fixed rate on the UI thread.
         self._plot_timer = QTimer(self)
@@ -1416,13 +1435,20 @@ class MocapWidget(QWidget):
 
     # Summary:
     # - Slot function that caches the latest QTM poses for the plot timer.
-    # - Input: `self`, `poses_qtm` (dict[str, np.ndarray | None]).
+    # - Input: `self`, `rigidbody_ts_ms` (int), `rigidbody_data` (dict[str, np.ndarray | None]).
     # - Returns: None.
     def _on_mocapStreamProxy_poses_ready(
-        self, poses_qtm: dict[str, Optional[np.ndarray]]
+        self, rigidbody_ts_ms: int, rigidbody_data: dict[str, Optional[np.ndarray]]
     ) -> None:
         # Cache poses so the UI timer can update the plot at a fixed rate.
-        self._latest_poses_qtm = poses_qtm
+        self._latest_poses_qtm = rigidbody_data
+        # Cache the latest rigid body packet fields for pull-style coupling usage.
+        self._latest_rigidbody_ts_ms = int(rigidbody_ts_ms)
+        self._latest_rigidbody_data = rigidbody_data
+        # Emit the packet outward so the coupled controller can match by timestamp.
+        self.sig_rigidbody_packet.emit(
+            self._latest_rigidbody_ts_ms, self._latest_rigidbody_data
+        )
 
     # Summary:
     # - Slot function that redraws the plot on a fixed timer interval.
@@ -1439,6 +1465,8 @@ class MocapWidget(QWidget):
     def _reset_plot_state(self) -> None:
         # Clear cached poses so the timer does not redraw stale data.
         self._latest_poses_qtm = {}
+        self._latest_rigidbody_ts_ms = None
+        self._latest_rigidbody_data = None
         # Clear the scatter so the user sees an empty plot when stopped.
         self._mocap_canvas.clear_points()
 
