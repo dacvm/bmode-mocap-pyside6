@@ -54,8 +54,19 @@ class Volume3DCanvas(FigureCanvas):
 
         # Keep a reference to the axes for fast updates later.
         self._axes = axes
-        # Create the scatter handle once so updates only move existing points.
-        self._scatter = self._axes.scatter([], [], [], s=2)
+        # Store the colormap name so it can be changed without recreating the scatter.
+        self._cmap_name = "viridis"
+        # Create the scatter with an explicit empty color array so cmap is valid.
+        self._scatter = self._axes.scatter(
+            [],
+            [],
+            [],
+            s=2,
+            c=np.array([], dtype=float),
+            cmap=self._cmap_name,
+        )
+        # Initialize the color array so Matplotlib knows this scatter is colormap-capable.
+        self._scatter.set_array(np.array([], dtype=float))
 
         # Disable autoscale so the camera stays stable after we set limits.
         self._axes.set_autoscale_on(False)
@@ -84,9 +95,6 @@ class Volume3DCanvas(FigureCanvas):
         min_xyz: Optional[np.ndarray],
         max_xyz: Optional[np.ndarray],
     ) -> None:
-        # Ignore intensities for now; the plot uses a single color.
-        _ = intensities
-
         # Clear the plot when there are no points to show.
         if points_xyz is None or points_xyz.size == 0:
             self.clear_points()
@@ -98,6 +106,20 @@ class Volume3DCanvas(FigureCanvas):
             points_xyz[:, 1],
             points_xyz[:, 2],
         )
+
+        # Apply intensity-based colors when we have a matching vector.
+        if intensities is not None and intensities.size == points_xyz.shape[0]:
+            vals = np.asarray(intensities, dtype=float)
+            self._scatter.set_array(vals)
+
+            vmin = float(np.min(vals))
+            vmax = float(np.max(vals))
+            if vmax <= vmin:
+                vmax = vmin + 1.0
+            self._scatter.set_clim(vmin, vmax)
+        else:
+            # Clear colors so Matplotlib falls back to defaults for empty or mismatched data.
+            self._scatter.set_array(np.array([], dtype=float))
 
         # Update bounds when they are available so the view fits the data.
         if min_xyz is not None and max_xyz is not None:
@@ -117,6 +139,17 @@ class Volume3DCanvas(FigureCanvas):
         # Request a redraw without blocking the UI thread.
         self.draw_idle()
 
+    # Summary:
+    # - Update the scatter colormap without recreating the artist.
+    # - Input: `self`, `cmap_name` (str).
+    # - Returns: None.
+    def set_colormap(self, cmap_name: str) -> None:
+        # Store the colormap name so future updates use the same palette.
+        self._cmap_name = cmap_name
+        # Apply the new colormap on the existing scatter handle.
+        self._scatter.set_cmap(cmap_name)
+        # Redraw to show the updated colormap immediately.
+        self.draw_idle()
     # Summary:
     # - Clear the scatter points and reset bounds tracking.
     # - Input: `self`.

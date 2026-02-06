@@ -95,7 +95,7 @@
         </layout>
        </item>
        <item>
-        <widget class="QPushButton" name="pushButton_mocap_recordStream">
+        <widget class="QPushButton" name="pushButton_mocap_record">
          <property name="text">
           <string>Record</string>
          </property>

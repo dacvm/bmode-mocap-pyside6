@@ -16,7 +16,7 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QImage, QKeySequence, QLinearGradient, QPainter,
     QPalette, QPixmap, QRadialGradient, QTransform)
 from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QSizePolicy, QSpacerItem,
+    QLineEdit, QPlainTextEdit, QPushButton, QSizePolicy,
     QVBoxLayout, QWidget)
 
 class Ui_Form(object):
@@ -76,9 +76,10 @@ class Ui_Form(object):
 
         self.verticalLayout_bmode_menu.addWidget(self.pushButton_bmode_openStream)
 
-        self.verticalSpacer = QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        self.plainTextEdit_bmode_textStream = QPlainTextEdit(Form)
+        self.plainTextEdit_bmode_textStream.setObjectName(u"plainTextEdit_bmode_textStream")
 
-        self.verticalLayout_bmode_menu.addItem(self.verticalSpacer)
+        self.verticalLayout_bmode_menu.addWidget(self.plainTextEdit_bmode_textStream)
 
         self.horizontalLayout_bmode_recorddir = QHBoxLayout()
         self.horizontalLayout_bmode_recorddir.setObjectName(u"horizontalLayout_bmode_recorddir")

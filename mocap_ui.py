@@ -86,10 +86,10 @@ class Ui_Form(object):
 
         self.verticalLayout_mocap_menu.addLayout(self.horizontalLayout_mocap_recorddir)
 
-        self.pushButton_mocap_recordStream = QPushButton(Form)
-        self.pushButton_mocap_recordStream.setObjectName(u"pushButton_mocap_recordStream")
+        self.pushButton_mocap_record = QPushButton(Form)
+        self.pushButton_mocap_record.setObjectName(u"pushButton_mocap_record")
 
-        self.verticalLayout_mocap_menu.addWidget(self.pushButton_mocap_recordStream)
+        self.verticalLayout_mocap_menu.addWidget(self.pushButton_mocap_record)
 
 
         self.horizontalLayout_mocap.addLayout(self.verticalLayout_mocap_menu)
@@ -127,6 +127,6 @@ class Ui_Form(object):
         self.lineEdit_mocap_recorddir.setPlaceholderText(QCoreApplication.translate("Form", u"~/output/", None))
         self.pushButton_mocap_recorddirClear.setText("")
         self.pushButton_mocap_recorddirBrowse.setText(QCoreApplication.translate("Form", u"Record Dir", None))
-        self.pushButton_mocap_recordStream.setText(QCoreApplication.translate("Form", u"Record", None))
+        self.pushButton_mocap_record.setText(QCoreApplication.translate("Form", u"Record", None))
     # retranslateUi
 
