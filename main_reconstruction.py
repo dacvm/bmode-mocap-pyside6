@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 # Coupler that matches image and rigid body packets by timestamp.
-from coupled_stream_controller import CoupledStreamController
+from helpers.coupled_stream_controller import CoupledStreamController
 # Generated UI class from Qt Designer (do not edit the generated file).
 from app_reconstruction_ui import Ui_MainWindow
 # Custom widgets that will be embedded into the main window layouts.
