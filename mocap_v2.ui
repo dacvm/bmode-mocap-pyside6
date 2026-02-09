@@ -15,7 +15,7 @@
   </property>
   <layout class="QHBoxLayout" name="horizontalLayout_2">
    <item>
-    <layout class="QHBoxLayout" name="horizontalLayout_mocap" stretch="2,3">
+    <layout class="QHBoxLayout" name="horizontalLayout_mocap" stretch="1,3">
      <item>
       <layout class="QVBoxLayout" name="verticalLayout_mocap_menu" stretch="0,0,0,0,0">
        <item>
