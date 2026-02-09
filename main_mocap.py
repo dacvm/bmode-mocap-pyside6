@@ -37,6 +37,17 @@ RECORD_NAN = float("nan")
 
 
 # Summary:
+# - Build a monotonic timestamp in milliseconds for mocap packets.
+# - What it does: Uses `time.monotonic()` to keep rigid body timestamps on the same
+#   stable clock source as image timestamps used for coupling.
+# - Input: None.
+# - Returns: Monotonic milliseconds (int).
+def _now_ms() -> int:
+    # Use a monotonic clock so packet deltas stay valid if wall clock time changes.
+    return int(time.monotonic() * 1000)
+
+
+# Summary:
 # - Matplotlib canvas that renders a live 3D scatter plot for mocap body positions.
 # - What it does: owns the Figure, a 3D Axes, and a single scatter handle that is updated in place.
 class Mocap3DCanvas(FigureCanvas):
@@ -70,9 +81,6 @@ class Mocap3DCanvas(FigureCanvas):
         # Track text labels so each point can show its rigid body name.
         self._label_texts: list = []
 
-        # Disable autoscale so camera stays stable after we set limits once.
-        self._axes.set_autoscale_on(False)
-
         # Label axes so users know the coordinate directions (Z is up after the base transform).
         self._axes.set_xlabel("X")
         self._axes.set_ylabel("Y")
@@ -80,12 +88,24 @@ class Mocap3DCanvas(FigureCanvas):
         self._axes.set_aspect("equal")
         self._axes.set_proj_type("ortho")
 
-        # Track whether we already autoscaled to the first valid frame.
-        self._has_autoscaled = False
+        # UI state change: lock the plot to a fixed world box so live points stay in a stable frame.
+        self._apply_fixed_bounds()
 
         # Ensure the canvas is parented to the widget tree if provided.
         if parent is not None:
             self.setParent(parent)
+
+    # Summary:
+    # - Apply fixed world-coordinate bounds to keep the view stable during live streaming.
+    # - Input: `self`.
+    # - Returns: None.
+    def _apply_fixed_bounds(self) -> None:
+        # Disable autoscale so incoming points never override the fixed world box.
+        self._axes.set_autoscale_on(False)
+        # Keep origin centered in X/Y and at the bottom of Z, using QTM millimeter units.
+        self._axes.set_xlim(-500.0, 500.0)
+        self._axes.set_ylim(-500.0, 500.0)
+        self._axes.set_zlim(0.0, 1000.0)
 
     # Summary:
     # - Ensure the label text artists match the number of rigid body labels.
@@ -123,7 +143,6 @@ class Mocap3DCanvas(FigureCanvas):
         x_values: list[float] = []
         y_values: list[float] = []
         z_values: list[float] = []
-        valid_positions: list[tuple[float, float, float]] = []
 
         # Convert each pose into scatter arrays while keeping insertion order.
         for index, (label, pose_qtm) in enumerate(poses_qtm.items()):
@@ -155,13 +174,12 @@ class Mocap3DCanvas(FigureCanvas):
             y_values.append(float(y_value))
             z_values.append(float(z_value))
 
-            # Use finite values only when we compute the initial autoscale.
+            # Validation: update labels only for finite coordinates so text does not drift to invalid points.
             if (
                 math.isfinite(x_value)
                 and math.isfinite(y_value)
                 and math.isfinite(z_value)
             ):
-                valid_positions.append((float(x_value), float(y_value), float(z_value)))
                 # Update the label position so it follows the visible point.
                 label_artist.set_text(label)
                 label_artist.set_position((float(x_value), float(y_value)))
@@ -175,33 +193,11 @@ class Mocap3DCanvas(FigureCanvas):
         # Update the existing scatter in place instead of recreating it.
         self._scatter._offsets3d = (x_values, y_values, z_values)
 
-        # Autoscale once on the first valid frame so the camera stays stable.
-        if valid_positions and not self._has_autoscaled:
-            # Compute bounds with a small margin so points are not on the edges.
-            x_list = [pos[0] for pos in valid_positions]
-            y_list = [pos[1] for pos in valid_positions]
-            z_list = [pos[2] for pos in valid_positions]
-
-            x_min, x_max = min(x_list), max(x_list)
-            y_min, y_max = min(y_list), max(y_list)
-            z_min, z_max = min(z_list), max(z_list)
-
-            x_margin = max((x_max - x_min) * 0.1, 1.0)
-            y_margin = max((y_max - y_min) * 0.1, 1.0)
-            z_margin = max((z_max - z_min) * 0.1, 1.0)
-
-            self._axes.set_xlim(x_min - x_margin, x_max + x_margin)
-            self._axes.set_ylim(y_min - y_margin, y_max + y_margin)
-            self._axes.set_zlim(z_min - z_margin, z_max + z_margin)
-
-            # Lock in the first autoscale to keep the camera stable.
-            self._has_autoscaled = True
-
         # Request a redraw without blocking the UI thread.
         self.draw_idle()
 
     # Summary:
-    # - Clear the scatter points and reset autoscale tracking.
+    # - Clear the scatter points while keeping the fixed plot bounds.
     # - Input: `self`.
     # - Returns: None.
     def clear_points(self) -> None:
@@ -210,8 +206,8 @@ class Mocap3DCanvas(FigureCanvas):
         # Hide labels so the cleared plot has no lingering text.
         for label_artist in self._label_texts:
             label_artist.set_visible(False)
-        # Allow autoscaling again when the next stream starts.
-        self._has_autoscaled = False
+        # UI state change: re-apply fixed bounds so stop/start cycles keep the same world box.
+        self._apply_fixed_bounds()
         # Schedule a redraw so the clear is visible to the user.
         self.draw_idle()
 
@@ -223,7 +219,7 @@ class Mocap3DCanvas(FigureCanvas):
 #   in a thread-safe way.
 class MocapStreamProxy(QObject):
     text_ready = Signal(str)
-    poses_ready = Signal(object)
+    poses_ready = Signal(int, object)
     state_changed = Signal(bool, str)
     record_message = Signal(str)
     record_stop = Signal(str)
@@ -1115,10 +1111,12 @@ class QtmStreamWorker:
         text = self._format_6d_residual_text(packet, body_names, result)
         # Build a stable pose mapping aligned with body_names for the plot.
         poses_qtm = self._extract_6d_poses(result, body_names)
+        # Timestamp the rigid body packet at PC-receive time for software coupling.
+        rigidbody_ts_ms = _now_ms()
         # Emit the text from the worker thread to the UI thread.
         self._safe_emit(self._proxy.text_ready.emit, text)
-        # Emit the poses from the worker thread to the UI thread.
-        self._safe_emit(self._proxy.poses_ready.emit, poses_qtm)
+        # Emit the timestamped rigid body packet from worker thread to UI thread.
+        self._safe_emit(self._proxy.poses_ready.emit, rigidbody_ts_ms, poses_qtm)
 
         # Forward the result to the recorder without touching any UI state.
         self._recorder.handle_6d_residual_result(result)
@@ -1130,6 +1128,9 @@ class QtmStreamWorker:
 # - What it ensures: the Qt UI never freezes (no blocking calls on the UI thread), and streaming/recording can
 #   be started and stopped repeatedly without restarting the application.
 class MocapWidget(QWidget):
+    # Signal: emit one rigid body packet per mocap update for downstream coupling.
+    sig_rigidbody_packet = Signal(int, object)
+
     # Summary:
     # - Initialize the UI and wire signal handlers for streaming control.
     # - Input: `self`.
@@ -1153,6 +1154,9 @@ class MocapWidget(QWidget):
 
         # Cache the latest QTM poses for the throttled plot updates.
         self._latest_poses_qtm: dict[str, Optional[np.ndarray]] = {}
+        # Cache the latest rigid body packet fields for coupled stream consumers.
+        self._latest_rigidbody_ts_ms: Optional[int] = None
+        self._latest_rigidbody_data: Optional[object] = None
 
         # Create a timer that redraws the plot at a fixed rate on the UI thread.
         self._plot_timer = QTimer(self)
@@ -1416,13 +1420,20 @@ class MocapWidget(QWidget):
 
     # Summary:
     # - Slot function that caches the latest QTM poses for the plot timer.
-    # - Input: `self`, `poses_qtm` (dict[str, np.ndarray | None]).
+    # - Input: `self`, `rigidbody_ts_ms` (int), `rigidbody_data` (dict[str, np.ndarray | None]).
     # - Returns: None.
     def _on_mocapStreamProxy_poses_ready(
-        self, poses_qtm: dict[str, Optional[np.ndarray]]
+        self, rigidbody_ts_ms: int, rigidbody_data: dict[str, Optional[np.ndarray]]
     ) -> None:
         # Cache poses so the UI timer can update the plot at a fixed rate.
-        self._latest_poses_qtm = poses_qtm
+        self._latest_poses_qtm = rigidbody_data
+        # Cache the latest rigid body packet fields for pull-style coupling usage.
+        self._latest_rigidbody_ts_ms = int(rigidbody_ts_ms)
+        self._latest_rigidbody_data = rigidbody_data
+        # Emit the packet outward so the coupled controller can match by timestamp.
+        self.sig_rigidbody_packet.emit(
+            self._latest_rigidbody_ts_ms, self._latest_rigidbody_data
+        )
 
     # Summary:
     # - Slot function that redraws the plot on a fixed timer interval.
@@ -1439,6 +1450,8 @@ class MocapWidget(QWidget):
     def _reset_plot_state(self) -> None:
         # Clear cached poses so the timer does not redraw stale data.
         self._latest_poses_qtm = {}
+        self._latest_rigidbody_ts_ms = None
+        self._latest_rigidbody_data = None
         # Clear the scatter so the user sees an empty plot when stopped.
         self._mocap_canvas.clear_points()
 

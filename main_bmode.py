@@ -36,18 +36,19 @@ IMAGE_RECORD_DROP_RATE_THRESHOLD = 0.05
 
 
 # Summary:
-# - Build a UTC epoch timestamp in milliseconds for frame packets.
-# - What it does: Uses time.time() to produce an integer ms value that is safe for threading.
+# - Build a monotonic timestamp in milliseconds for frame packets.
+# - What it does: Uses `time.monotonic()` so image timestamps share the same stable
+#   clock source as mocap timestamps for software coupling.
 # - Input: None.
-# - Returns: Milliseconds since Unix epoch (int).
-def _utc_epoch_ms() -> int:
-    # Use time.time because it is lightweight and thread-safe for this use case.
-    return int(time.time() * 1000)
+# - Returns: Monotonic milliseconds (int).
+def _now_ms() -> int:
+    # Use a monotonic clock so timestamp deltas are stable if system time changes.
+    return int(time.monotonic() * 1000)
 
 
 # Summary:
-# - Lightweight container for a single RGB frame and its metadata.
-# - What it does: Stores timestamp, dimensions, format label, and raw RGB bytes for UI rendering.
+# - Lightweight container for one streamed frame and its metadata.
+# - What it does: Stores timestamp, dimensions, format label, and raw bytes for UI rendering/recording.
 @dataclass
 class FramePacket:
     timestamp_ms: int
@@ -200,17 +201,17 @@ class CameraStreamWorker:
                     )
                     break
 
-                # Convert OpenCV's BGR to RGB for Qt rendering.
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                height, width, _channels = rgb.shape
+                # Convert camera frames to single-channel uint8 because reconstruction expects grayscale.
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                height, width = gray.shape
 
-                # Package the frame so the UI thread can render safely.
+                # Package the grayscale frame so the UI thread can render safely.
                 packet = FramePacket(
-                    _utc_epoch_ms(),
+                    _now_ms(),
                     width,
                     height,
-                    "rgb888",
-                    rgb.tobytes(),
+                    "gray8",
+                    gray.tobytes(),
                 )
                 # Emit the frame via the proxy so the UI thread can pick it up.
                 self._safe_emit(self._proxy.frame_ready.emit, packet)
@@ -343,10 +344,10 @@ class ScreenGrabWorker(QObject):
             self.stop()
             return
 
-        # Convert the pixmap into a packed RGB888 byte buffer.
-        qimg = pixmap.toImage().convertToFormat(QImage.Format_RGB888)
+        # Convert the pixmap into grayscale so downstream payloads are single-channel uint8.
+        qimg = pixmap.toImage().convertToFormat(QImage.Format_Grayscale8)
         bytes_per_line = qimg.bytesPerLine()
-        expected_bytes_per_line = qimg.width() * 3
+        expected_bytes_per_line = qimg.width()
         height = qimg.height()
 
         # Extract the raw bytes from the QImage memory.
@@ -361,7 +362,7 @@ class ScreenGrabWorker(QObject):
             raw = bytes(bits[:buffer_size])
 
         if bytes_per_line != expected_bytes_per_line:
-            # Remove per-line padding so the payload is tightly packed RGB888.
+            # Remove per-line padding so the payload is tightly packed grayscale bytes.
             packed_lines = []
             for row in range(height):
                 start = row * bytes_per_line
@@ -372,10 +373,10 @@ class ScreenGrabWorker(QObject):
 
         # Emit the frame packet for UI rendering.
         packet = FramePacket(
-            _utc_epoch_ms(),
+            _now_ms(),
             qimg.width(),
             qimg.height(),
-            "rgb888",
+            "gray8",
             data,
         )
         self._proxy.frame_ready.emit(packet)
@@ -618,7 +619,8 @@ class ImageRecordWorker:
                     continue
 
             timestamp_ms, width, height, data = payload
-            expected_size = int(width) * int(height) * 3
+            # Validate against a single-channel payload size because streaming now uses uint8 grayscale.
+            expected_size = int(width) * int(height)
             if len(data) < expected_size:
                 # Stop recording if frame data is incomplete to avoid corrupt files.
                 self._safe_emit(
@@ -629,7 +631,8 @@ class ImageRecordWorker:
                 break
 
             try:
-                rgb = np.frombuffer(data, dtype=np.uint8).reshape((height, width, 3))
+                # Decode the packed frame buffer as a 2D grayscale image.
+                gray = np.frombuffer(data, dtype=np.uint8).reshape((height, width))
             except ValueError:
                 # Stop recording if the byte buffer cannot be reshaped.
                 self._safe_emit(
@@ -639,13 +642,10 @@ class ImageRecordWorker:
                 stop_event.set()
                 break
 
-            # Convert RGB to BGR for OpenCV's JPEG encoder.
-            bgr = rgb[:, :, ::-1]
-
-            # Encode to JPEG to keep disk writes lightweight.
+            # Encode grayscale JPEG directly to keep disk writes lightweight.
             ok, buffer = cv2.imencode(
                 ".jpg",
-                bgr,
+                gray,
                 [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY],
             )
             if not ok:
@@ -681,6 +681,8 @@ class ImageRecordWorker:
 # Returns: A QWidget subclass instance that can be shown in a QApplication.
 class BModeWidget(QWidget):
     """Lightweight window that simply renders the V2 form."""
+    # Signal: emit one image packet per received frame for downstream coupling.
+    sig_image_packet = Signal(int, object)
 
     # Summary: Initialize the window and connect UI signals.
     # What it does: Sets up the generated UI, prepares stream workers, and hooks buttons/combos to handlers.
@@ -703,6 +705,9 @@ class BModeWidget(QWidget):
 
         # Cache the most recent frame packet so the UI can render on a timer.
         self._latest_frame_packet: Optional[FramePacket] = None
+        # Cache the latest image packet fields for coupled stream consumers.
+        self._latest_image_ts_ms: Optional[int] = None
+        self._latest_image_data: Optional[object] = None
         # Track the current stream state to keep the open/stop button repeat-safe.
         self._is_streaming = False
 
@@ -1178,6 +1183,14 @@ class BModeWidget(QWidget):
     def _on_bmodeStreamProxy_frame_ready(self, packet: FramePacket) -> None:
         # Cache the packet so rendering can happen on the display timer.
         self._latest_frame_packet = packet
+        # Convert the FramePacket fields to the agreed image packet naming.
+        image_ts_ms = int(packet.timestamp_ms)
+        image_data = packet
+        # Cache the latest image packet for consumers that need pull-style access.
+        self._latest_image_ts_ms = image_ts_ms
+        self._latest_image_data = image_data
+        # Emit the packet so the coupling controller can match image+rigidbody samples.
+        self.sig_image_packet.emit(image_ts_ms, image_data)
         # Enqueue the frame for recording without blocking the UI thread.
         self._image_record_worker.handle_frame(packet)
 
@@ -1226,6 +1239,8 @@ class BModeWidget(QWidget):
         self._display_timer.stop()
         # Clear cached frame data so we do not display stale images.
         self._latest_frame_packet = None
+        self._latest_image_ts_ms = None
+        self._latest_image_data = None
         self.ui.label_bmode_image.clear()
 
     # Summary: Slot function that shows worker errors on the UI thread.
@@ -1278,19 +1293,28 @@ class BModeWidget(QWidget):
             return
 
         packet = self._latest_frame_packet
-        bytes_per_line = packet.width * 3
+        # Default to grayscale rendering because the stream payload is now single-channel uint8.
+        qimage_format = QImage.Format_Grayscale8
+        bytes_per_line = packet.width
         expected_size = bytes_per_line * packet.height
+
+        # Keep RGB fallback support so older/legacy packets still display correctly.
+        if packet.fmt == "rgb888":
+            qimage_format = QImage.Format_RGB888
+            bytes_per_line = packet.width * 3
+            expected_size = bytes_per_line * packet.height
+
         if len(packet.data) < expected_size:
             # Ignore incomplete packets to avoid rendering garbage.
             return
 
-        # Create a QImage from the raw RGB bytes.
+        # Create a QImage from the raw bytes using the packet format.
         qimage = QImage(
             packet.data,
             packet.width,
             packet.height,
             bytes_per_line,
-            QImage.Format_RGB888,
+            qimage_format,
         )
         # Detach the QImage from the raw buffer so it stays valid after this method.
         qimage = qimage.copy()
@@ -1335,6 +1359,8 @@ class BModeWidget(QWidget):
         self.ui.lineEdit_bmode_calibPath.setEnabled(True)
         # Clear cached frame data and the image label.
         self._latest_frame_packet = None
+        self._latest_image_ts_ms = None
+        self._latest_image_data = None
         self.ui.label_bmode_image.clear()
 
     # Summary: Handle the window close event.
