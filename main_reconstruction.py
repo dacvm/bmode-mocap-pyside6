@@ -16,7 +16,7 @@ from helpers.coupled_stream_controller import CoupledStreamController
 # Generated UI class from Qt Designer (do not edit the generated file).
 from app_reconstruction_ui import Ui_MainWindow
 # Sequence writer that exports coupled packets into Plus-style .mha files.
-from mha_writer import MhaWriter
+from helpers.mha_writer import MhaWriter
 # Custom widgets that will be embedded into the main window layouts.
 from main_bmode import BModeWidget
 from main_mocap import MocapWidget
