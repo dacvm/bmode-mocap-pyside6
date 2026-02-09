@@ -21,7 +21,7 @@ from PySide6.QtGui import QGuiApplication, QImage, QPixmap, QScreen
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QWidget
 
 # Generated UI classes that wrap the Qt Designer forms into Python-friendly fields.
-from bmode_ui import Ui_Form as Ui_BModeV2
+from ui.bmode_ui import Ui_Form as Ui_BModeV2
 # Class to parse the Calibration XML.
 from helpers.xml_stream_parser import (
     CoordinateDefinitionsExtractor,

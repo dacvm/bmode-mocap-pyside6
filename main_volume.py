@@ -19,7 +19,7 @@ from PySide6.QtCore import QObject, Qt, Signal, QTimer, QSize
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 # Generated UI class from Qt Designer (do not edit the _ui.py file).
-from volume_ui import Ui_Form as Ui_Volume
+from ui.volume_ui import Ui_Form as Ui_Volume
 
 from helpers.mha_reader import MhaReader
 from helpers.mha_volume import MhaVolume

@@ -25,7 +25,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, QSize, Signal
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 # Generated UI class from Qt Designer (do not edit the _ui.py file).
-from mocap_ui import Ui_Form as Ui_Mocap
+from ui.mocap_ui import Ui_Form as Ui_Mocap
 
 QTM_PORT = 22223
 QTM_PROTOCOL_VERSION = "1.20"

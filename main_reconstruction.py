@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBo
 # Coupler that matches image and rigid body packets by timestamp.
 from helpers.coupled_stream_controller import CoupledStreamController
 # Generated UI class from Qt Designer (do not edit the generated file).
-from app_reconstruction_ui import Ui_MainWindow
+from ui.app_reconstruction_ui import Ui_MainWindow
 # Sequence writer that exports coupled packets into Plus-style .mha files.
 from helpers.mha_writer import MhaWriter
 # Custom widgets that will be embedded into the main window layouts.
