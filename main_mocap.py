@@ -228,6 +228,7 @@ class MocapStreamProxy(QObject):
     state_changed = Signal(bool, str)
     record_message = Signal(str)
     record_stop = Signal(str)
+    record_row_ts_ms = Signal(object)
 
     # Summary:
     # - Initialize the proxy and assign a stable objectName for slot naming consistency.
@@ -465,6 +466,8 @@ class CsvRecordWorker:
 
         # Capture the arrival time on the stream thread for accurate timestamps.
         row = [self._utc_epoch_ms()]
+        # Cache the row timestamp so external image sync can use the same CSV clock.
+        ts_ms = row[0]
 
         # Fill NaNs when the 6D component is missing in the current packet.
         if result is None:
@@ -559,6 +562,9 @@ class CsvRecordWorker:
         except queue.Full:
             # Drop newest when the queue is full to protect latency.
             did_drop = True
+        if not did_drop:
+            # Emit the CSV row timestamp so coupled image recording can sync per-row.
+            self._safe_emit(self._proxy.record_row_ts_ms.emit, int(ts_ms))
 
         now_monotonic = time.monotonic()
         overload = self._update_record_drop_stats(did_drop, now_monotonic)
@@ -1135,6 +1141,9 @@ class QtmStreamWorker:
 class MocapWidget(QWidget):
     # Signal: emit one rigid body packet per mocap update for downstream coupling.
     sig_rigidbody_packet = Signal(int, object)
+    # Signal: emit the CSV row timestamp so external image recording can sync to it.
+    # Use object to preserve 64-bit UTC epoch values without overflow.
+    sig_record_row_ts_ms = Signal(object)
 
     # Summary:
     # - Initialize the UI and wire signal handlers for streaming control.
@@ -1144,6 +1153,8 @@ class MocapWidget(QWidget):
         super().__init__()
         self.ui = Ui_Mocap()
         self.ui.setupUi(self)
+        # Set a stable objectName so slot naming can follow project conventions.
+        self.setObjectName("mocapWidget")
 
         # Keep the text area readable but non-editable for incoming stream data.
         self.ui.plainTextEdit_mocap_textStream.setReadOnly(True)
@@ -1195,6 +1206,8 @@ class MocapWidget(QWidget):
         self._stream_proxy.record_message.connect(self._on_mocapStreamProxy_record_message)
         # Signal connection: stop recording safely from background threads.
         self._stream_proxy.record_stop.connect(self._on_mocapStreamProxy_record_stop)
+        # Signal connection: forward record row timestamps to external consumers.
+        self._stream_proxy.record_row_ts_ms.connect(self.sig_record_row_ts_ms)
 
         # Create worker instances that own the stream and recording threads.
         self._record_worker = CsvRecordWorker(self._stream_proxy)
@@ -1518,6 +1531,86 @@ class MocapWidget(QWidget):
 
         # Fall back to the base name if we somehow exhausted all suffixes.
         return file_path
+
+    # Summary:
+    # - Start a CSV recording session requested by an external controller.
+    # - What it does: Validates streaming state and record directory, builds the CSV schema,
+    #   starts the writer thread, and returns the active CSV file path.
+    # - Input: `self`, `record_dir` (str).
+    # - Returns: Full CSV file path on success, otherwise an empty string (str).
+    def start_external_csv_record(self, record_dir: str) -> str:
+        # Validation: require an active stream so recording stays aligned to live packets.
+        if self._stream_state != "streaming":
+            QMessageBox.warning(
+                self,
+                "Stream Not Active",
+                "Start streaming before recording.",
+            )
+            return ""
+
+        # Validation: avoid double-starts when a recording is already active.
+        if self._record_worker.is_active():
+            QMessageBox.warning(
+                self,
+                "Recording Active",
+                "A mocap recording is already active.",
+            )
+            return ""
+
+        # Validation: ensure a record directory is provided and writable.
+        if not record_dir:
+            QMessageBox.warning(
+                self,
+                "Missing Record Directory",
+                "Please choose a record directory before recording.",
+            )
+            return ""
+        record_dir = os.path.abspath(record_dir)
+        if not os.path.isdir(record_dir):
+            QMessageBox.warning(
+                self,
+                "Invalid Record Directory",
+                "The selected record directory does not exist.",
+            )
+            return ""
+        if not os.access(record_dir, os.W_OK):
+            QMessageBox.warning(
+                self,
+                "Record Directory Not Writable",
+                "The selected directory is not writable.",
+            )
+            return ""
+
+        # Freeze the body names at record start so the CSV schema is stable.
+        record_body_names = self._stream_worker.body_names_snapshot()
+        if not record_body_names:
+            # Fall back to the latest pose keys when QTM parameters are unavailable.
+            if not self._latest_poses_qtm:
+                QMessageBox.warning(
+                    self,
+                    "Body Names Missing",
+                    "Rigid body names are not available yet. Try again once streaming is active.",
+                )
+                return ""
+            record_body_names = list(self._latest_poses_qtm.keys())
+
+        # Build the output path and header before starting the writer thread.
+        record_file_path = self._build_record_file_path(record_dir)
+        record_header = self._build_record_header(record_body_names)
+
+        # Start the writer thread so file I/O never blocks the stream thread.
+        self._record_worker.start(record_file_path, record_header, record_body_names)
+
+        return record_file_path
+
+    # Summary:
+    # - Stop an externally-controlled CSV recording session.
+    # - What it does: Stops the writer thread so the CSV file can flush and close.
+    # - Input: `self`, `reason` (str).
+    # - Returns: None.
+    def stop_external_csv_record(self, reason: str = "") -> None:
+        # Stop the recording worker so it can flush and close cleanly.
+        self._record_worker.stop(reason)
 
     # Summary:
     # - Start a new CSV recording session on the UI thread.

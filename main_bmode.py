@@ -439,9 +439,13 @@ class ImageRecordWorker:
 
     # Summary:
     # - Start the JPEG writer thread and reset recording state for a new session.
-    # - Input: `self`, `record_dir` (str).
+    # - Input: `self`, `record_dir` (str), `queue_maxsize` (int | None).
     # - Returns: Created session directory path (str).
-    def start(self, record_dir: str) -> str:
+    def start(
+        self,
+        record_dir: str,
+        queue_maxsize: Optional[int] = None,
+    ) -> str:
         # Ensure only one recording session is active at a time.
         with self._lock:
             if self._active:
@@ -468,8 +472,11 @@ class ImageRecordWorker:
             self._record_drop_window_dropped = 0
             self._record_overload_triggered = False
 
+            # Use the requested queue size so external sync can avoid drops.
+            if queue_maxsize is None:
+                queue_maxsize = IMAGE_RECORD_QUEUE_MAXSIZE
             # Create fresh queue/stop event per session so writer state is isolated.
-            self._queue = queue.Queue(maxsize=IMAGE_RECORD_QUEUE_MAXSIZE)
+            self._queue = queue.Queue(maxsize=max(int(queue_maxsize), 0))
             self._stop_event = threading.Event()
 
             # Start the writer thread so JPEG encoding and disk I/O never block the UI.
@@ -710,6 +717,8 @@ class BModeWidget(QWidget):
         self._latest_image_data: Optional[object] = None
         # Track the current stream state to keep the open/stop button repeat-safe.
         self._is_streaming = False
+        # Track external recording mode so image saving can be driven by mocap timestamps.
+        self._external_recording_active = False
 
         # Timer to throttle rendering so the UI thread stays responsive.
         self._display_timer = QTimer(self)
@@ -1028,6 +1037,8 @@ class BModeWidget(QWidget):
 
         # Stop the recording worker so it can flush and close cleanly.
         self._image_record_worker.stop(reason)
+        # Reset external state so normal per-frame recording can resume later.
+        self._external_recording_active = False
 
         # UI state change: unlock the record directory controls.
         self.ui.lineEdit_bmode_recorddir.setEnabled(True)
@@ -1039,6 +1050,56 @@ class BModeWidget(QWidget):
         # Show the stop reason so the user understands why recording ended.
         if reason:
             QMessageBox.warning(self, "Recording Stopped", reason)
+
+    # Summary:
+    # - Start an externally-controlled image recording session.
+    # - What it does: Starts the image writer thread and marks external mode so snapshots can be driven
+    #   by mocap timestamps instead of every incoming frame.
+    # - Input: `self`, `record_dir` (str).
+    # - Returns: Created session directory path (str).
+    def start_external_image_record(self, record_dir: str) -> str:
+        # Start the writer thread with an unbounded queue so snapshots are never dropped.
+        session_dir = self._image_record_worker.start(record_dir, queue_maxsize=0)
+        # Track external state so per-frame auto recording is disabled.
+        self._external_recording_active = True
+        return session_dir
+
+    # Summary:
+    # - Stop an externally-controlled image recording session.
+    # - What it does: Clears external mode and stops the image writer thread.
+    # - Input: `self`, `reason` (str).
+    # - Returns: None.
+    def stop_external_image_record(self, reason: str = "") -> None:
+        # Clear external mode so per-frame recording logic can resume when needed.
+        self._external_recording_active = False
+        # Stop the writer thread so file handles flush and close.
+        self._image_record_worker.stop(reason)
+
+    # Summary:
+    # - Record a snapshot of the latest frame using an injected timestamp.
+    # - What it does: Reuses the most recent frame bytes but overrides the timestamp to align
+    #   filenames with mocap CSV row times.
+    # - Input: `self`, `ts_ms` (int).
+    # - Returns: None.
+    def record_latest_frame_with_ts(self, ts_ms: int) -> None:
+        # Ignore snapshot requests when external recording is not active.
+        if not self._external_recording_active:
+            return
+        # Skip recording when no frame has been cached yet.
+        if self._latest_frame_packet is None:
+            return
+
+        # Build a new packet with the injected timestamp but the same frame payload.
+        latest_packet = self._latest_frame_packet
+        snapshot_packet = FramePacket(
+            int(ts_ms),
+            latest_packet.width,
+            latest_packet.height,
+            latest_packet.fmt,
+            latest_packet.data,
+        )
+        # Enqueue the snapshot without blocking the UI thread.
+        self._image_record_worker.handle_frame(snapshot_packet)
 
     # Summary: Start streaming based on the selected stream option.
     # What it does: Chooses camera streaming or screen streaming, then starts the appropriate worker.
@@ -1191,6 +1252,9 @@ class BModeWidget(QWidget):
         self._latest_image_data = image_data
         # Emit the packet so the coupling controller can match image+rigidbody samples.
         self.sig_image_packet.emit(image_ts_ms, image_data)
+        # Avoid per-frame recording while external coupling is driving snapshots.
+        if self._external_recording_active:
+            return
         # Enqueue the frame for recording without blocking the UI thread.
         self._image_record_worker.handle_frame(packet)
 
