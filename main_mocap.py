@@ -81,9 +81,6 @@ class Mocap3DCanvas(FigureCanvas):
         # Track text labels so each point can show its rigid body name.
         self._label_texts: list = []
 
-        # Disable autoscale so camera stays stable after we set limits once.
-        self._axes.set_autoscale_on(False)
-
         # Label axes so users know the coordinate directions (Z is up after the base transform).
         self._axes.set_xlabel("X")
         self._axes.set_ylabel("Y")
@@ -91,12 +88,24 @@ class Mocap3DCanvas(FigureCanvas):
         self._axes.set_aspect("equal")
         self._axes.set_proj_type("ortho")
 
-        # Track whether we already autoscaled to the first valid frame.
-        self._has_autoscaled = False
+        # UI state change: lock the plot to a fixed world box so live points stay in a stable frame.
+        self._apply_fixed_bounds()
 
         # Ensure the canvas is parented to the widget tree if provided.
         if parent is not None:
             self.setParent(parent)
+
+    # Summary:
+    # - Apply fixed world-coordinate bounds to keep the view stable during live streaming.
+    # - Input: `self`.
+    # - Returns: None.
+    def _apply_fixed_bounds(self) -> None:
+        # Disable autoscale so incoming points never override the fixed world box.
+        self._axes.set_autoscale_on(False)
+        # Keep origin centered in X/Y and at the bottom of Z, using QTM millimeter units.
+        self._axes.set_xlim(-500.0, 500.0)
+        self._axes.set_ylim(-500.0, 500.0)
+        self._axes.set_zlim(0.0, 1000.0)
 
     # Summary:
     # - Ensure the label text artists match the number of rigid body labels.
@@ -134,7 +143,6 @@ class Mocap3DCanvas(FigureCanvas):
         x_values: list[float] = []
         y_values: list[float] = []
         z_values: list[float] = []
-        valid_positions: list[tuple[float, float, float]] = []
 
         # Convert each pose into scatter arrays while keeping insertion order.
         for index, (label, pose_qtm) in enumerate(poses_qtm.items()):
@@ -166,13 +174,12 @@ class Mocap3DCanvas(FigureCanvas):
             y_values.append(float(y_value))
             z_values.append(float(z_value))
 
-            # Use finite values only when we compute the initial autoscale.
+            # Validation: update labels only for finite coordinates so text does not drift to invalid points.
             if (
                 math.isfinite(x_value)
                 and math.isfinite(y_value)
                 and math.isfinite(z_value)
             ):
-                valid_positions.append((float(x_value), float(y_value), float(z_value)))
                 # Update the label position so it follows the visible point.
                 label_artist.set_text(label)
                 label_artist.set_position((float(x_value), float(y_value)))
@@ -186,33 +193,11 @@ class Mocap3DCanvas(FigureCanvas):
         # Update the existing scatter in place instead of recreating it.
         self._scatter._offsets3d = (x_values, y_values, z_values)
 
-        # Autoscale once on the first valid frame so the camera stays stable.
-        if valid_positions and not self._has_autoscaled:
-            # Compute bounds with a small margin so points are not on the edges.
-            x_list = [pos[0] for pos in valid_positions]
-            y_list = [pos[1] for pos in valid_positions]
-            z_list = [pos[2] for pos in valid_positions]
-
-            x_min, x_max = min(x_list), max(x_list)
-            y_min, y_max = min(y_list), max(y_list)
-            z_min, z_max = min(z_list), max(z_list)
-
-            x_margin = max((x_max - x_min) * 0.1, 1.0)
-            y_margin = max((y_max - y_min) * 0.1, 1.0)
-            z_margin = max((z_max - z_min) * 0.1, 1.0)
-
-            self._axes.set_xlim(x_min - x_margin, x_max + x_margin)
-            self._axes.set_ylim(y_min - y_margin, y_max + y_margin)
-            self._axes.set_zlim(z_min - z_margin, z_max + z_margin)
-
-            # Lock in the first autoscale to keep the camera stable.
-            self._has_autoscaled = True
-
         # Request a redraw without blocking the UI thread.
         self.draw_idle()
 
     # Summary:
-    # - Clear the scatter points and reset autoscale tracking.
+    # - Clear the scatter points while keeping the fixed plot bounds.
     # - Input: `self`.
     # - Returns: None.
     def clear_points(self) -> None:
@@ -221,8 +206,8 @@ class Mocap3DCanvas(FigureCanvas):
         # Hide labels so the cleared plot has no lingering text.
         for label_artist in self._label_texts:
             label_artist.set_visible(False)
-        # Allow autoscaling again when the next stream starts.
-        self._has_autoscaled = False
+        # UI state change: re-apply fixed bounds so stop/start cycles keep the same world box.
+        self._apply_fixed_bounds()
         # Schedule a redraw so the clear is visible to the user.
         self.draw_idle()
 
