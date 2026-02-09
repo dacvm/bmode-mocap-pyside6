@@ -117,7 +117,7 @@ class Ui_Form(object):
 
         self.horizontalLayout_bmode.addWidget(self.label_bmode_image)
 
-        self.horizontalLayout_bmode.setStretch(0, 2)
+        self.horizontalLayout_bmode.setStretch(0, 1)
         self.horizontalLayout_bmode.setStretch(1, 3)
 
         self.horizontalLayout_3.addLayout(self.horizontalLayout_bmode)

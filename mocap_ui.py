@@ -106,7 +106,7 @@ class Ui_Form(object):
 
         self.horizontalLayout_mocap.addWidget(self.widget_mocap_matplotlib)
 
-        self.horizontalLayout_mocap.setStretch(0, 2)
+        self.horizontalLayout_mocap.setStretch(0, 1)
         self.horizontalLayout_mocap.setStretch(1, 3)
 
         self.horizontalLayout_2.addLayout(self.horizontalLayout_mocap)

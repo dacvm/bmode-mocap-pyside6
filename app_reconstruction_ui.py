@@ -24,7 +24,7 @@ class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
             MainWindow.setObjectName(u"MainWindow")
-        MainWindow.resize(1300, 1000)
+        MainWindow.resize(1400, 1000)
         self.centralwidget = QWidget(MainWindow)
         self.centralwidget.setObjectName(u"centralwidget")
         self.horizontalLayout_2 = QHBoxLayout(self.centralwidget)
@@ -63,16 +63,43 @@ class Ui_MainWindow(object):
         self.groupBox_3.setObjectName(u"groupBox_3")
         self.verticalLayout_8 = QVBoxLayout(self.groupBox_3)
         self.verticalLayout_8.setObjectName(u"verticalLayout_8")
-        self.verticalLayout_8.setContentsMargins(9, 9, 9, 9)
+        self.verticalLayout_8.setContentsMargins(9, 4, 9, 9)
         self.horizontalLayout_3 = QHBoxLayout()
         self.horizontalLayout_3.setObjectName(u"horizontalLayout_3")
         self.gridLayout = QGridLayout()
         self.gridLayout.setObjectName(u"gridLayout")
         self.gridLayout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self.label = QLabel(self.groupBox_3)
+        self.label.setObjectName(u"label")
+
+        self.gridLayout.addWidget(self.label, 0, 2, 1, 1)
+
         self.label_2 = QLabel(self.groupBox_3)
         self.label_2.setObjectName(u"label_2")
 
         self.gridLayout.addWidget(self.label_2, 1, 0, 1, 1)
+
+        self.label_status_bmode = QLabel(self.groupBox_3)
+        self.label_status_bmode.setObjectName(u"label_status_bmode")
+
+        self.gridLayout.addWidget(self.label_status_bmode, 0, 1, 1, 1)
+
+        self.label_status_mocap = QLabel(self.groupBox_3)
+        self.label_status_mocap.setObjectName(u"label_status_mocap")
+
+        self.gridLayout.addWidget(self.label_status_mocap, 1, 1, 1, 1)
+
+        self.pushButton_coupledrecord_recorddirClear = QPushButton(self.groupBox_3)
+        self.pushButton_coupledrecord_recorddirClear.setObjectName(u"pushButton_coupledrecord_recorddirClear")
+        icon = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.EditClear))
+        self.pushButton_coupledrecord_recorddirClear.setIcon(icon)
+
+        self.gridLayout.addWidget(self.pushButton_coupledrecord_recorddirClear, 0, 4, 1, 1)
+
+        self.lineEdit_coupledrecord_recorddir = QLineEdit(self.groupBox_3)
+        self.lineEdit_coupledrecord_recorddir.setObjectName(u"lineEdit_coupledrecord_recorddir")
+
+        self.gridLayout.addWidget(self.lineEdit_coupledrecord_recorddir, 0, 3, 1, 1)
 
         self.label_1 = QLabel(self.groupBox_3)
         self.label_1.setObjectName(u"label_1")
@@ -81,22 +108,15 @@ class Ui_MainWindow(object):
 
         self.pushButton_coupledrecord_recorddirBrowse = QPushButton(self.groupBox_3)
         self.pushButton_coupledrecord_recorddirBrowse.setObjectName(u"pushButton_coupledrecord_recorddirBrowse")
-        icon = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.FolderOpen))
-        self.pushButton_coupledrecord_recorddirBrowse.setIcon(icon)
+        icon1 = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.FolderOpen))
+        self.pushButton_coupledrecord_recorddirBrowse.setIcon(icon1)
 
-        self.gridLayout.addWidget(self.pushButton_coupledrecord_recorddirBrowse, 2, 3, 1, 1)
+        self.gridLayout.addWidget(self.pushButton_coupledrecord_recorddirBrowse, 0, 5, 1, 1)
 
-        self.pushButton_coupledrecord_recorddirClear = QPushButton(self.groupBox_3)
-        self.pushButton_coupledrecord_recorddirClear.setObjectName(u"pushButton_coupledrecord_recorddirClear")
-        icon1 = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.EditClear))
-        self.pushButton_coupledrecord_recorddirClear.setIcon(icon1)
+        self.label_3 = QLabel(self.groupBox_3)
+        self.label_3.setObjectName(u"label_3")
 
-        self.gridLayout.addWidget(self.pushButton_coupledrecord_recorddirClear, 2, 2, 1, 1)
-
-        self.lineEdit_coupledrecord_recorddir = QLineEdit(self.groupBox_3)
-        self.lineEdit_coupledrecord_recorddir.setObjectName(u"lineEdit_coupledrecord_recorddir")
-
-        self.gridLayout.addWidget(self.lineEdit_coupledrecord_recorddir, 2, 1, 1, 1)
+        self.gridLayout.addWidget(self.label_3, 1, 2, 1, 1)
 
         self.horizontalLayout_4 = QHBoxLayout()
         self.horizontalLayout_4.setObjectName(u"horizontalLayout_4")
@@ -112,35 +132,14 @@ class Ui_MainWindow(object):
         self.horizontalLayout_4.addWidget(self.radioButton_imagecsv)
 
 
-        self.gridLayout.addLayout(self.horizontalLayout_4, 3, 1, 1, 1)
+        self.gridLayout.addLayout(self.horizontalLayout_4, 1, 3, 1, 1)
 
         self.pushButton_coupledrecord_recordStream = QPushButton(self.groupBox_3)
         self.pushButton_coupledrecord_recordStream.setObjectName(u"pushButton_coupledrecord_recordStream")
 
-        self.gridLayout.addWidget(self.pushButton_coupledrecord_recordStream, 3, 2, 1, 2)
+        self.gridLayout.addWidget(self.pushButton_coupledrecord_recordStream, 1, 4, 1, 2)
 
-        self.label = QLabel(self.groupBox_3)
-        self.label.setObjectName(u"label")
-
-        self.gridLayout.addWidget(self.label, 2, 0, 1, 1)
-
-        self.label_3 = QLabel(self.groupBox_3)
-        self.label_3.setObjectName(u"label_3")
-
-        self.gridLayout.addWidget(self.label_3, 3, 0, 1, 1)
-
-        self.label_status_bmode = QLabel(self.groupBox_3)
-        self.label_status_bmode.setObjectName(u"label_status_bmode")
-
-        self.gridLayout.addWidget(self.label_status_bmode, 0, 1, 1, 3)
-
-        self.label_status_mocap = QLabel(self.groupBox_3)
-        self.label_status_mocap.setObjectName(u"label_status_mocap")
-
-        self.gridLayout.addWidget(self.label_status_mocap, 1, 1, 1, 3)
-
-        self.gridLayout.setColumnStretch(0, 1)
-        self.gridLayout.setColumnStretch(1, 2)
+        self.gridLayout.setColumnStretch(1, 1)
         self.gridLayout.setColumnStretch(3, 1)
 
         self.horizontalLayout_3.addLayout(self.gridLayout)
@@ -181,7 +180,7 @@ class Ui_MainWindow(object):
         MainWindow.setCentralWidget(self.centralwidget)
         self.menubar = QMenuBar(MainWindow)
         self.menubar.setObjectName(u"menubar")
-        self.menubar.setGeometry(QRect(0, 0, 1300, 22))
+        self.menubar.setGeometry(QRect(0, 0, 1400, 22))
         MainWindow.setMenuBar(self.menubar)
         self.statusbar = QStatusBar(MainWindow)
         self.statusbar.setObjectName(u"statusbar")
@@ -197,18 +196,18 @@ class Ui_MainWindow(object):
         self.groupBox_1.setTitle(QCoreApplication.translate("MainWindow", u"B-mode", None))
         self.groupBox_2.setTitle(QCoreApplication.translate("MainWindow", u"Motion Capture", None))
         self.groupBox_3.setTitle(QCoreApplication.translate("MainWindow", u"Coupled Recording", None))
+        self.label.setText(QCoreApplication.translate("MainWindow", u"Record Path", None))
         self.label_2.setText(QCoreApplication.translate("MainWindow", u"Mocap Status", None))
-        self.label_1.setText(QCoreApplication.translate("MainWindow", u"B-Mode Status", None))
-        self.pushButton_coupledrecord_recorddirBrowse.setText(QCoreApplication.translate("MainWindow", u"Record Dir", None))
+        self.label_status_bmode.setText(QCoreApplication.translate("MainWindow", u"Disconnected", None))
+        self.label_status_mocap.setText(QCoreApplication.translate("MainWindow", u"Disconnected", None))
         self.pushButton_coupledrecord_recorddirClear.setText("")
         self.lineEdit_coupledrecord_recorddir.setPlaceholderText(QCoreApplication.translate("MainWindow", u"~/output/", None))
+        self.label_1.setText(QCoreApplication.translate("MainWindow", u"B-Mode Status", None))
+        self.pushButton_coupledrecord_recorddirBrowse.setText(QCoreApplication.translate("MainWindow", u"Record Dir", None))
+        self.label_3.setText(QCoreApplication.translate("MainWindow", u"Record Type", None))
         self.radioButton_mha.setText(QCoreApplication.translate("MainWindow", u".mha", None))
         self.radioButton_imagecsv.setText(QCoreApplication.translate("MainWindow", u"image + .csv", None))
         self.pushButton_coupledrecord_recordStream.setText(QCoreApplication.translate("MainWindow", u"Record", None))
-        self.label.setText(QCoreApplication.translate("MainWindow", u"Record Path", None))
-        self.label_3.setText(QCoreApplication.translate("MainWindow", u"Record Type", None))
-        self.label_status_bmode.setText(QCoreApplication.translate("MainWindow", u"Disconnected", None))
-        self.label_status_mocap.setText(QCoreApplication.translate("MainWindow", u"Disconnected", None))
         self.groupBox_4.setTitle(QCoreApplication.translate("MainWindow", u"Volume", None))
     # retranslateUi
 

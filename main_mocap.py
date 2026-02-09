@@ -16,9 +16,12 @@ from typing import Optional
 # Third-party imports for QTM real-time streaming, numeric transforms, plotting, and Qt UI.
 import qtm_rt
 import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import (
+    FigureCanvasQTAgg as FigureCanvas,
+    NavigationToolbar2QT as NavigationToolbar,
+)
 from matplotlib.figure import Figure
-from PySide6.QtCore import QObject, Signal, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, QSize, Signal
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 # Generated UI class from Qt Designer (do not edit the _ui.py file).
@@ -85,6 +88,11 @@ class Mocap3DCanvas(FigureCanvas):
         self._axes.set_xlabel("X")
         self._axes.set_ylabel("Y")
         self._axes.set_zlabel("Z (Up)")
+        # Hide all 3D panes so only points/labels and axes remain visible.
+        self._axes.xaxis.pane.set_visible(False)
+        self._axes.yaxis.pane.set_visible(False)
+        self._axes.zaxis.pane.set_visible(False)
+        # Set the axis to be equal and orthogonal 
         self._axes.set_aspect("equal")
         self._axes.set_proj_type("ortho")
 
@@ -140,6 +148,8 @@ class Mocap3DCanvas(FigureCanvas):
         # Sync label artists with the incoming labels before updating positions.
         self._sync_label_artists(labels)
 
+        # Keep only finite values for scatter updates because mixed NaN/finite arrays
+        # can cause unstable 3D rendering on early frames.
         x_values: list[float] = []
         y_values: list[float] = []
         z_values: list[float] = []
@@ -149,20 +159,14 @@ class Mocap3DCanvas(FigureCanvas):
             # Grab the matching text artist so each point can show its label.
             label_artist = self._label_texts[index]
 
-            # Treat missing entries as NaN so Matplotlib skips them.
+            # Treat missing entries as invalid and hide the label for this body.
             if pose_qtm is None or not isinstance(pose_qtm, np.ndarray):
-                x_values.append(math.nan)
-                y_values.append(math.nan)
-                z_values.append(math.nan)
                 # Hide the label because there is no visible point.
                 label_artist.set_visible(False)
                 continue
 
             # Ensure we only process valid homogeneous transforms.
             if pose_qtm.shape != (4, 4):
-                x_values.append(math.nan)
-                y_values.append(math.nan)
-                z_values.append(math.nan)
                 # Hide the label because the pose is not drawable.
                 label_artist.set_visible(False)
                 continue
@@ -170,16 +174,17 @@ class Mocap3DCanvas(FigureCanvas):
             # Apply the fixed base transform (left-multiplication changes world frame to plot frame).
             pose_plot = self.T_base @ pose_qtm
             x_value, y_value, z_value = pose_plot[:3, 3]
-            x_values.append(float(x_value))
-            y_values.append(float(y_value))
-            z_values.append(float(z_value))
 
-            # Validation: update labels only for finite coordinates so text does not drift to invalid points.
+            # Validation/transforms: only use finite coordinates for both scatter and labels
+            # so missing bodies never suppress valid bodies in the same frame.
             if (
                 math.isfinite(x_value)
                 and math.isfinite(y_value)
                 and math.isfinite(z_value)
             ):
+                x_values.append(float(x_value))
+                y_values.append(float(y_value))
+                z_values.append(float(z_value))
                 # Update the label position so it follows the visible point.
                 label_artist.set_text(label)
                 label_artist.set_position((float(x_value), float(y_value)))
@@ -1150,6 +1155,19 @@ class MocapWidget(QWidget):
 
         # Build the Matplotlib canvas and place it in the prepared UI container.
         self._mocap_canvas = Mocap3DCanvas(self)
+        # Build a Matplotlib navigation toolbar so users can pan/zoom/reset and save the 3D view.
+        self._mocap_toolbar = NavigationToolbar(self._mocap_canvas, self)
+        # UI state change: use compact icon-only controls so the toolbar consumes less vertical space.
+        self._mocap_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._mocap_toolbar.setIconSize(QSize(14, 14))
+        self._mocap_toolbar.setFixedHeight(18)
+        # UI state change: trim button padding/margins so controls stay usable but denser.
+        self._mocap_toolbar.setStyleSheet(
+            "QToolBar { spacing: 0px; padding: 0px; margin: 0px; }"
+            "QToolButton { padding: 0px; margin: 0px; }"
+        )
+        # UI state change: place toolbar above the canvas for direct interaction controls.
+        self.ui.verticalLayout_mocap_matplotlib.addWidget(self._mocap_toolbar)
         self.ui.verticalLayout_mocap_matplotlib.addWidget(self._mocap_canvas)
 
         # Cache the latest QTM poses for the throttled plot updates.
