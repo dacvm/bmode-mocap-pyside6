@@ -16,9 +16,12 @@ from typing import Optional
 # Third-party imports for QTM real-time streaming, numeric transforms, plotting, and Qt UI.
 import qtm_rt
 import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import (
+    FigureCanvasQTAgg as FigureCanvas,
+    NavigationToolbar2QT as NavigationToolbar,
+)
 from matplotlib.figure import Figure
-from PySide6.QtCore import QObject, Signal, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, QSize, Signal
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 # Generated UI class from Qt Designer (do not edit the _ui.py file).
@@ -85,6 +88,11 @@ class Mocap3DCanvas(FigureCanvas):
         self._axes.set_xlabel("X")
         self._axes.set_ylabel("Y")
         self._axes.set_zlabel("Z (Up)")
+        # Hide all 3D panes so only points/labels and axes remain visible.
+        self._axes.xaxis.pane.set_visible(False)
+        self._axes.yaxis.pane.set_visible(False)
+        self._axes.zaxis.pane.set_visible(False)
+        # Set the axis to be equal and orthogonal 
         self._axes.set_aspect("equal")
         self._axes.set_proj_type("ortho")
 
@@ -1147,6 +1155,19 @@ class MocapWidget(QWidget):
 
         # Build the Matplotlib canvas and place it in the prepared UI container.
         self._mocap_canvas = Mocap3DCanvas(self)
+        # Build a Matplotlib navigation toolbar so users can pan/zoom/reset and save the 3D view.
+        self._mocap_toolbar = NavigationToolbar(self._mocap_canvas, self)
+        # UI state change: use compact icon-only controls so the toolbar consumes less vertical space.
+        self._mocap_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._mocap_toolbar.setIconSize(QSize(14, 14))
+        self._mocap_toolbar.setFixedHeight(18)
+        # UI state change: trim button padding/margins so controls stay usable but denser.
+        self._mocap_toolbar.setStyleSheet(
+            "QToolBar { spacing: 0px; padding: 0px; margin: 0px; }"
+            "QToolButton { padding: 0px; margin: 0px; }"
+        )
+        # UI state change: place toolbar above the canvas for direct interaction controls.
+        self.ui.verticalLayout_mocap_matplotlib.addWidget(self._mocap_toolbar)
         self.ui.verticalLayout_mocap_matplotlib.addWidget(self._mocap_canvas)
 
         # Cache the latest QTM poses for the throttled plot updates.

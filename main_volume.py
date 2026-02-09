@@ -8,9 +8,12 @@ from typing import Optional
 
 # Third-party imports for plotting and numeric helpers.
 import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import (
+    FigureCanvasQTAgg as FigureCanvas,
+    NavigationToolbar2QT as NavigationToolbar,
+)
 from matplotlib.figure import Figure
-from PySide6.QtCore import QObject, Qt, Signal, QTimer
+from PySide6.QtCore import QObject, Qt, Signal, QTimer, QSize
 
 # Qt widgets for the main window and file dialogs.
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
@@ -74,6 +77,11 @@ class Volume3DCanvas(FigureCanvas):
         self._axes.set_xlabel("X")
         self._axes.set_ylabel("Y")
         self._axes.set_zlabel("Z")
+        # Hide all 3D panes so only points and axes remain visible.
+        self._axes.xaxis.pane.set_visible(False)
+        self._axes.yaxis.pane.set_visible(False)
+        self._axes.zaxis.pane.set_visible(False)
+        self._axes.set_aspect("equal")
         self._axes.set_proj_type("ortho")
 
         # Track whether bounds have been set at least once.
@@ -300,6 +308,19 @@ class VolumeWidget(QWidget):
 
         # Build the 3D scatter canvas and add it to the layout.
         self._volume_canvas = Volume3DCanvas(self.ui.widget_volume_scatter)
+        # Build a Matplotlib navigation toolbar so users can pan/zoom/reset and save the 3D view.
+        self._volume_toolbar = NavigationToolbar(self._volume_canvas, self)
+        # UI state change: use compact icon-only controls so the toolbar consumes less vertical space.
+        self._volume_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._volume_toolbar.setIconSize(QSize(14, 14))
+        self._volume_toolbar.setFixedHeight(18)
+        # UI state change: trim button padding/margins so controls stay usable but denser.
+        self._volume_toolbar.setStyleSheet(
+            "QToolBar { spacing: 0px; padding: 0px; margin: 0px; }"
+            "QToolButton { padding: 0px; margin: 0px; }"
+        )
+        # UI state change: place toolbar above the canvas for direct interaction controls.
+        self.ui.verticalLayout_volume_scatter.addWidget(self._volume_toolbar)
         self.ui.verticalLayout_volume_scatter.addWidget(self._volume_canvas)
 
         # Create a proxy to deliver geometry-building results back to the UI thread.
