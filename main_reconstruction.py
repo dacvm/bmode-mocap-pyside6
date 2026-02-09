@@ -1,6 +1,7 @@
 """Main window wrapper that embeds B-mode, Mocap, and Volume widgets."""
 
 # Standard library helpers for filesystem normalization and app exit codes.
+from datetime import datetime
 import os
 import sys
 from typing import Optional
@@ -14,6 +15,8 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBo
 from helpers.coupled_stream_controller import CoupledStreamController
 # Generated UI class from Qt Designer (do not edit the generated file).
 from app_reconstruction_ui import Ui_MainWindow
+# Sequence writer that exports coupled packets into Plus-style .mha files.
+from mha_writer import MhaWriter
 # Custom widgets that will be embedded into the main window layouts.
 from main_bmode import BModeWidget
 from main_mocap import MocapWidget
@@ -68,6 +71,9 @@ class MainWindow(QMainWindow):
         # Track the latest debug values so one status line can show coupling health.
         self._latest_coupled_diff_ms: Optional[int] = None
         self._latest_coupler_stats: dict = {}
+        # Track active record mode and writer so all stop paths can finalize safely.
+        self._mha_writer: Optional[MhaWriter] = None
+        self._active_record_mode: Optional[str] = None
 
         # Create the software coupler for image+pose sample-and-hold matching.
         self._coupler = CoupledStreamController(
@@ -137,7 +143,25 @@ class MainWindow(QMainWindow):
         self.ui.label_status_bmode.setText("Disconnected")
         # Stop coupled recording when one source drops so sessions stay valid.
         if self._coupler.is_recording():
+            had_active_mha_writer = (
+                self._active_record_mode == ".mha" and self._mha_writer is not None
+            )
             self._coupler.stop_recording()
+            # Finalize any active .mha recording so payload and header stay consistent.
+            final_path = self._finalize_active_mha_recording(
+                show_success_message=False,
+                show_error_dialog=True,
+            )
+            if final_path:
+                self.statusBar().showMessage(
+                    f"B-mode stream stopped; partial .mha saved: {final_path}",
+                    9000,
+                )
+            elif not had_active_mha_writer:
+                self.statusBar().showMessage(
+                    "B-mode stream stopped; coupled recording was ended.",
+                    9000,
+                )
             # UI state change: restore record button text after forced stop.
             self.ui.pushButton_coupledrecord_recordStream.setText("Record")
 
@@ -159,7 +183,25 @@ class MainWindow(QMainWindow):
         self.ui.label_status_mocap.setText("Disconnected")
         # Stop coupled recording when one source drops so sessions stay valid.
         if self._coupler.is_recording():
+            had_active_mha_writer = (
+                self._active_record_mode == ".mha" and self._mha_writer is not None
+            )
             self._coupler.stop_recording()
+            # Finalize any active .mha recording so payload and header stay consistent.
+            final_path = self._finalize_active_mha_recording(
+                show_success_message=False,
+                show_error_dialog=True,
+            )
+            if final_path:
+                self.statusBar().showMessage(
+                    f"Mocap stream stopped; partial .mha saved: {final_path}",
+                    9000,
+                )
+            elif not had_active_mha_writer:
+                self.statusBar().showMessage(
+                    "Mocap stream stopped; coupled recording was ended.",
+                    9000,
+                )
             # UI state change: restore record button text after forced stop.
             self.ui.pushButton_coupledrecord_recordStream.setText("Record")
 
@@ -178,14 +220,41 @@ class MainWindow(QMainWindow):
         rigidbody_data: object,
         diff_ms: int,
     ) -> None:
-        # Avoid unused-parameter warnings while keeping full signal signature explicit.
-        _ = image_data
-        _ = rigidbody_data
-        _ = image_ts_ms
-        _ = rigidbody_ts_ms
         # Cache the latest diff so status/debug text can show coupling quality.
         self._latest_coupled_diff_ms = int(diff_ms)
         self._update_coupled_debug_status()
+        # During active .mha recording, append this accepted coupled packet to disk.
+        if (
+            self._coupler.is_recording()
+            and self._active_record_mode == ".mha"
+            and self._mha_writer is not None
+        ):
+            try:
+                self._mha_writer.append_coupled_packet(
+                    image_ts_ms=image_ts_ms,
+                    image_data=image_data,
+                    rigidbody_ts_ms=rigidbody_ts_ms,
+                    rigidbody_data=rigidbody_data,
+                )
+            except Exception as exc:
+                # Stop and finalize on write failure to avoid leaving temp payload files behind.
+                if self._coupler.is_recording():
+                    self._coupler.stop_recording()
+                self._finalize_active_mha_recording(
+                    show_success_message=False,
+                    show_error_dialog=False,
+                )
+                # UI state change: reflect that recording is no longer active.
+                self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+                QMessageBox.warning(
+                    self,
+                    "MHA Write Error",
+                    f"Coupled recording stopped because writing failed:\n{exc}",
+                )
+                self.statusBar().showMessage(
+                    f"Coupled recording stopped due to .mha write error: {exc}",
+                    9000,
+                )
 
     # Summary:
     # - Slot function for coupling stats updates from the CoupledStreamController.
@@ -273,9 +342,27 @@ class MainWindow(QMainWindow):
         # Slot function: react to the Record button click.
         # Toggle behavior: stop immediately if coupled recording is currently active.
         if self._coupler.is_recording():
+            had_active_mha_writer = (
+                self._active_record_mode == ".mha" and self._mha_writer is not None
+            )
             self._coupler.stop_recording()
+            # Finalize active .mha output now that recording has ended.
+            final_path = self._finalize_active_mha_recording(
+                show_success_message=False,
+                show_error_dialog=True,
+            )
             # UI state change: restore button text when recording stops.
             self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+            if final_path:
+                self.statusBar().showMessage(
+                    f"Coupled recording saved to: {final_path}",
+                    9000,
+                )
+            elif not had_active_mha_writer:
+                self.statusBar().showMessage(
+                    "Coupled recording stopped.",
+                    5000,
+                )
             return
 
         # Validation: ensure a record directory is set before proceeding.
@@ -310,13 +397,45 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Derive selected mode for debug output while recorder writing is not implemented yet.
+        # Normalize/create output directory early so writer startup errors are explicit.
+        normalized_record_dir = os.path.abspath(os.path.expanduser(record_dir))
+        try:
+            os.makedirs(normalized_record_dir, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Record Directory Error",
+                f"Could not prepare record directory:\n{exc}",
+            )
+            return
+
+        # Derive selected mode and initialize writer only for .mha mode.
         if self.ui.radioButton_imagecsv.isChecked():
             selected_mode = "image + .csv"
+            self._mha_writer = None
+            self._active_record_mode = selected_mode
         elif self.ui.radioButton_mha.isChecked():
             selected_mode = ".mha"
+            output_mha_path = self._build_mha_output_path(normalized_record_dir)
+            writer = MhaWriter(invert_transforms=False)
+            try:
+                writer.start(output_mha_path)
+            except Exception as exc:
+                # Cleanup state when startup fails before recording can start.
+                self._mha_writer = None
+                self._active_record_mode = None
+                QMessageBox.warning(
+                    self,
+                    "MHA Start Failed",
+                    f"Could not start .mha recording:\n{exc}",
+                )
+                return
+            self._mha_writer = writer
+            self._active_record_mode = ".mha"
         else:
             selected_mode = "unknown"
+            self._mha_writer = None
+            self._active_record_mode = None
 
         # Start coupling session so incoming image packets produce coupled packets.
         self._coupler.start_recording()
@@ -327,6 +446,64 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Coupled recording started ({selected_mode}). Waiting for coupled packets..."
         )
+
+    # Summary:
+    # - Build a timestamped output path for one coupled sequence `.mha` file.
+    # - What it does: Normalizes the record directory and creates a deterministic Plus-like filename.
+    # - Input: `self`, `record_dir` (str).
+    # - Returns: Full `.mha` output path (str).
+    def _build_mha_output_path(self, record_dir: str) -> str:
+        # Normalize path so all writer calls receive a stable absolute directory.
+        normalized_dir = os.path.abspath(os.path.expanduser(record_dir))
+        timestamp_text = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"SequenceRecording_{timestamp_text}.mha"
+        return os.path.join(normalized_dir, filename)
+
+    # Summary:
+    # - Finalize and clear the active `.mha` writer session if one is running.
+    # - What it does: Calls `MhaWriter.finalize()` with error handling, updates status/UI feedback,
+    #   and always clears writer state so future recordings start cleanly.
+    # - Input: `self`, `show_success_message` (bool), `show_error_dialog` (bool).
+    # - Returns: Final path on success, otherwise None (Optional[str]).
+    def _finalize_active_mha_recording(
+        self,
+        show_success_message: bool,
+        show_error_dialog: bool,
+    ) -> Optional[str]:
+        final_path = None
+
+        # No-op when current record mode is not .mha or writer was never created.
+        if self._active_record_mode != ".mha" or self._mha_writer is None:
+            self._mha_writer = None
+            self._active_record_mode = None
+            return None
+
+        try:
+            final_path = self._mha_writer.finalize()
+            if show_success_message:
+                # UI state change: confirm final file path for quick operator verification.
+                self.statusBar().showMessage(
+                    f"Coupled .mha saved: {final_path}",
+                    9000,
+                )
+        except Exception as exc:
+            # Surface finalize failures because they can indicate incomplete recording output.
+            self.statusBar().showMessage(
+                f"Failed to finalize coupled .mha recording: {exc}",
+                9000,
+            )
+            if show_error_dialog:
+                QMessageBox.warning(
+                    self,
+                    "MHA Finalize Error",
+                    f"Could not finalize .mha recording:\n{exc}",
+                )
+        finally:
+            # Always clear mode/writer references to avoid stale state on the next session.
+            self._mha_writer = None
+            self._active_record_mode = None
+
+        return final_path
 
     # Summary:
     # - Handle the main-window close event.
@@ -340,6 +517,11 @@ class MainWindow(QMainWindow):
         # Stop coupling so queued packets are ignored during window teardown.
         if self._coupler.is_recording():
             self._coupler.stop_recording()
+            # Finalize best-effort on close to keep the current recording recoverable.
+            self._finalize_active_mha_recording(
+                show_success_message=False,
+                show_error_dialog=False,
+            )
         # UI state change: restore record button text on shutdown.
         self.ui.pushButton_coupledrecord_recordStream.setText("Record")
 
