@@ -140,6 +140,8 @@ class Mocap3DCanvas(FigureCanvas):
         # Sync label artists with the incoming labels before updating positions.
         self._sync_label_artists(labels)
 
+        # Keep only finite values for scatter updates because mixed NaN/finite arrays
+        # can cause unstable 3D rendering on early frames.
         x_values: list[float] = []
         y_values: list[float] = []
         z_values: list[float] = []
@@ -149,20 +151,14 @@ class Mocap3DCanvas(FigureCanvas):
             # Grab the matching text artist so each point can show its label.
             label_artist = self._label_texts[index]
 
-            # Treat missing entries as NaN so Matplotlib skips them.
+            # Treat missing entries as invalid and hide the label for this body.
             if pose_qtm is None or not isinstance(pose_qtm, np.ndarray):
-                x_values.append(math.nan)
-                y_values.append(math.nan)
-                z_values.append(math.nan)
                 # Hide the label because there is no visible point.
                 label_artist.set_visible(False)
                 continue
 
             # Ensure we only process valid homogeneous transforms.
             if pose_qtm.shape != (4, 4):
-                x_values.append(math.nan)
-                y_values.append(math.nan)
-                z_values.append(math.nan)
                 # Hide the label because the pose is not drawable.
                 label_artist.set_visible(False)
                 continue
@@ -170,16 +166,17 @@ class Mocap3DCanvas(FigureCanvas):
             # Apply the fixed base transform (left-multiplication changes world frame to plot frame).
             pose_plot = self.T_base @ pose_qtm
             x_value, y_value, z_value = pose_plot[:3, 3]
-            x_values.append(float(x_value))
-            y_values.append(float(y_value))
-            z_values.append(float(z_value))
 
-            # Validation: update labels only for finite coordinates so text does not drift to invalid points.
+            # Validation/transforms: only use finite coordinates for both scatter and labels
+            # so missing bodies never suppress valid bodies in the same frame.
             if (
                 math.isfinite(x_value)
                 and math.isfinite(y_value)
                 and math.isfinite(z_value)
             ):
+                x_values.append(float(x_value))
+                y_values.append(float(y_value))
+                z_values.append(float(z_value))
                 # Update the label position so it follows the visible point.
                 label_artist.set_text(label)
                 label_artist.set_position((float(x_value), float(y_value)))
