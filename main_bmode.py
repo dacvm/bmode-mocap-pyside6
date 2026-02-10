@@ -439,9 +439,13 @@ class ImageRecordWorker:
 
     # Summary:
     # - Start the JPEG writer thread and reset recording state for a new session.
-    # - Input: `self`, `record_dir` (str).
+    # - Input: `self`, `record_dir` (str), `queue_maxsize` (int | None).
     # - Returns: Created session directory path (str).
-    def start(self, record_dir: str) -> str:
+    def start(
+        self,
+        record_dir: str,
+        queue_maxsize: Optional[int] = None,
+    ) -> str:
         # Ensure only one recording session is active at a time.
         with self._lock:
             if self._active:
@@ -468,8 +472,11 @@ class ImageRecordWorker:
             self._record_drop_window_dropped = 0
             self._record_overload_triggered = False
 
+            # Use the requested queue size so external sync can avoid drops.
+            if queue_maxsize is None:
+                queue_maxsize = IMAGE_RECORD_QUEUE_MAXSIZE
             # Create fresh queue/stop event per session so writer state is isolated.
-            self._queue = queue.Queue(maxsize=IMAGE_RECORD_QUEUE_MAXSIZE)
+            self._queue = queue.Queue(maxsize=max(int(queue_maxsize), 0))
             self._stop_event = threading.Event()
 
             # Start the writer thread so JPEG encoding and disk I/O never block the UI.
@@ -692,6 +699,8 @@ class BModeWidget(QWidget):
         super().__init__()  # Call the QWidget constructor to initialize Qt internals.
         self.ui = Ui_BModeV2()  # Instantiate the generated UI helper for the V2 layout.
         self.ui.setupUi(self)  # Wire the widgets from the .ui file to this QWidget instance.
+        # Cache the original image-label stylesheet so recording indicator changes keep the base background color.
+        self._bmode_image_label_base_stylesheet = self.ui.label_bmode_image.styleSheet()
 
         # Cache the calibration-derived screen rectangle used for screen streaming.
         self._screen_rect: Optional[tuple[int, int, int, int]] = None
@@ -710,6 +719,8 @@ class BModeWidget(QWidget):
         self._latest_image_data: Optional[object] = None
         # Track the current stream state to keep the open/stop button repeat-safe.
         self._is_streaming = False
+        # Track external recording mode so image saving can be driven by mocap timestamps.
+        self._external_recording_active = False
 
         # Timer to throttle rendering so the UI thread stays responsive.
         self._display_timer = QTimer(self)
@@ -1016,6 +1027,8 @@ class BModeWidget(QWidget):
         self.ui.pushButton_bmode_recorddirClear.setEnabled(False)
         # UI state change: update the record button to show stop intent.
         self.ui.pushButton_bmode_recordStream.setText("Stop Recording")
+        # UI state change: show a clear visual indicator on the image label while recording is active.
+        self._set_bmode_recording_indicator(active=True)
 
     # Summary: Stop the active JPEG recording session and release writer resources.
     # What it does: Stops the background thread, restores UI controls, and reports any reason.
@@ -1028,6 +1041,8 @@ class BModeWidget(QWidget):
 
         # Stop the recording worker so it can flush and close cleanly.
         self._image_record_worker.stop(reason)
+        # Reset external state so normal per-frame recording can resume later.
+        self._external_recording_active = False
 
         # UI state change: unlock the record directory controls.
         self.ui.lineEdit_bmode_recorddir.setEnabled(True)
@@ -1035,10 +1050,109 @@ class BModeWidget(QWidget):
         self.ui.pushButton_bmode_recorddirClear.setEnabled(True)
         # UI state change: restore the record button text.
         self.ui.pushButton_bmode_recordStream.setText("Record")
+        # UI state change: remove the recording indicator and restore the original label style.
+        self._set_bmode_recording_indicator(active=False)
 
         # Show the stop reason so the user understands why recording ended.
         if reason:
             QMessageBox.warning(self, "Recording Stopped", reason)
+
+    # Summary: Update the image-label border to indicate whether recording is active.
+    # What it does: Keeps the label's original stylesheet (including background color) and conditionally
+    # adds/removes a thick red border for recording status feedback.
+    # Input: `self`, `active` (bool).
+    # Returns: `None`.
+    def _set_bmode_recording_indicator(self, active: bool) -> None:
+        # Use the cached base style so we never overwrite the .ui-defined background color.
+        base_stylesheet = self._bmode_image_label_base_stylesheet.strip()
+        if active:
+            # Keep Qt syntax valid by producing selector-based rules when we add scoped selectors.
+            selector = "#label_bmode_image"
+            child_reset_rule = f"{selector} * {{ border: 0px; }}"
+            if "{" in base_stylesheet and "}" in base_stylesheet:
+                # If the base style already contains full selector rules, append the border rule directly.
+                indicator_stylesheet = (
+                    f"{base_stylesheet}\n"
+                    f"{selector} {{ border: 6px solid rgb(255, 0, 0); }}\n"
+                    f"{child_reset_rule}"
+                )
+            elif base_stylesheet:
+                # Convert property-only declarations into a selector block before adding the border.
+                normalized_base = base_stylesheet.rstrip(";")
+                indicator_stylesheet = (
+                    f"{selector} {{ {normalized_base}; border: 6px solid rgb(255, 0, 0); }}\n"
+                    f"{child_reset_rule}"
+                )
+            else:
+                indicator_stylesheet = (
+                    f"{selector} {{ border: 6px solid rgb(255, 0, 0); }}\n"
+                    f"{child_reset_rule}"
+                )
+            self.ui.label_bmode_image.setStyleSheet(indicator_stylesheet)
+            return
+
+        # Restore the exact original style when recording is not active.
+        self.ui.label_bmode_image.setStyleSheet(base_stylesheet)
+
+    # Summary:
+    # - Set the B-mode recording indicator from an external controller.
+    # - What it does: Exposes a small public API so parent windows can toggle the same indicator
+    #   used by this widget's local record button without duplicating stylesheet logic.
+    # - Input: `self`, `active` (bool).
+    # - Returns: None.
+    def set_recording_indicator(self, active: bool) -> None:
+        # WHY: Keep indicator style ownership inside this widget even when recording is started elsewhere.
+        self._set_bmode_recording_indicator(active=active)
+
+    # Summary:
+    # - Start an externally-controlled image recording session.
+    # - What it does: Starts the image writer thread and marks external mode so snapshots can be driven
+    #   by mocap timestamps instead of every incoming frame.
+    # - Input: `self`, `record_dir` (str).
+    # - Returns: Created session directory path (str).
+    def start_external_image_record(self, record_dir: str) -> str:
+        # Start the writer thread with an unbounded queue so snapshots are never dropped.
+        session_dir = self._image_record_worker.start(record_dir, queue_maxsize=0)
+        # Track external state so per-frame auto recording is disabled.
+        self._external_recording_active = True
+        return session_dir
+
+    # Summary:
+    # - Stop an externally-controlled image recording session.
+    # - What it does: Clears external mode and stops the image writer thread.
+    # - Input: `self`, `reason` (str).
+    # - Returns: None.
+    def stop_external_image_record(self, reason: str = "") -> None:
+        # Clear external mode so per-frame recording logic can resume when needed.
+        self._external_recording_active = False
+        # Stop the writer thread so file handles flush and close.
+        self._image_record_worker.stop(reason)
+
+    # Summary:
+    # - Record a snapshot of the latest frame using an injected timestamp.
+    # - What it does: Reuses the most recent frame bytes but overrides the timestamp to align
+    #   filenames with mocap CSV row times.
+    # - Input: `self`, `ts_ms` (int).
+    # - Returns: None.
+    def record_latest_frame_with_ts(self, ts_ms: int) -> None:
+        # Ignore snapshot requests when external recording is not active.
+        if not self._external_recording_active:
+            return
+        # Skip recording when no frame has been cached yet.
+        if self._latest_frame_packet is None:
+            return
+
+        # Build a new packet with the injected timestamp but the same frame payload.
+        latest_packet = self._latest_frame_packet
+        snapshot_packet = FramePacket(
+            int(ts_ms),
+            latest_packet.width,
+            latest_packet.height,
+            latest_packet.fmt,
+            latest_packet.data,
+        )
+        # Enqueue the snapshot without blocking the UI thread.
+        self._image_record_worker.handle_frame(snapshot_packet)
 
     # Summary: Start streaming based on the selected stream option.
     # What it does: Chooses camera streaming or screen streaming, then starts the appropriate worker.
@@ -1191,6 +1305,9 @@ class BModeWidget(QWidget):
         self._latest_image_data = image_data
         # Emit the packet so the coupling controller can match image+rigidbody samples.
         self.sig_image_packet.emit(image_ts_ms, image_data)
+        # Avoid per-frame recording while external coupling is driving snapshots.
+        if self._external_recording_active:
+            return
         # Enqueue the frame for recording without blocking the UI thread.
         self._image_record_worker.handle_frame(packet)
 
@@ -1326,9 +1443,18 @@ class BModeWidget(QWidget):
     # Input: `self`, `pixmap` (the image to show).
     # Returns: `None`.
     def _display_pixmap(self, pixmap: QPixmap) -> None:
-        # Scale the pixmap to the label with the same style as camera frames.
+        # Use the label content rect (inside stylesheet border) to prevent size-hint feedback loops.
+        target_size = self.ui.label_bmode_image.contentsRect().size()
+        # Fall back to full label size if content rect is transiently empty during layout updates.
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            target_size = self.ui.label_bmode_image.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            # Skip drawing until the widget has a valid render area.
+            return
+
+        # Scale the pixmap to the available content area while keeping the image aspect ratio.
         scaled = pixmap.scaled(
-            self.ui.label_bmode_image.size(),
+            target_size,
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
         )
