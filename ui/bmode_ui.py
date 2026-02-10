@@ -114,6 +114,9 @@ class Ui_Form(object):
 
         self.label_bmode_image = QLabel(Form)
         self.label_bmode_image.setObjectName(u"label_bmode_image")
+        self.label_bmode_image.setAutoFillBackground(False)
+        self.label_bmode_image.setStyleSheet(u"background-color: rgb(0,0,0);")
+        self.label_bmode_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.horizontalLayout_bmode.addWidget(self.label_bmode_image)
 
