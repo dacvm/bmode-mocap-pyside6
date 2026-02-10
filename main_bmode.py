@@ -699,6 +699,8 @@ class BModeWidget(QWidget):
         super().__init__()  # Call the QWidget constructor to initialize Qt internals.
         self.ui = Ui_BModeV2()  # Instantiate the generated UI helper for the V2 layout.
         self.ui.setupUi(self)  # Wire the widgets from the .ui file to this QWidget instance.
+        # Cache the original image-label stylesheet so recording indicator changes keep the base background color.
+        self._bmode_image_label_base_stylesheet = self.ui.label_bmode_image.styleSheet()
 
         # Cache the calibration-derived screen rectangle used for screen streaming.
         self._screen_rect: Optional[tuple[int, int, int, int]] = None
@@ -1025,6 +1027,8 @@ class BModeWidget(QWidget):
         self.ui.pushButton_bmode_recorddirClear.setEnabled(False)
         # UI state change: update the record button to show stop intent.
         self.ui.pushButton_bmode_recordStream.setText("Stop Recording")
+        # UI state change: show a clear visual indicator on the image label while recording is active.
+        self._set_bmode_recording_indicator(active=True)
 
     # Summary: Stop the active JPEG recording session and release writer resources.
     # What it does: Stops the background thread, restores UI controls, and reports any reason.
@@ -1046,10 +1050,34 @@ class BModeWidget(QWidget):
         self.ui.pushButton_bmode_recorddirClear.setEnabled(True)
         # UI state change: restore the record button text.
         self.ui.pushButton_bmode_recordStream.setText("Record")
+        # UI state change: remove the recording indicator and restore the original label style.
+        self._set_bmode_recording_indicator(active=False)
 
         # Show the stop reason so the user understands why recording ended.
         if reason:
             QMessageBox.warning(self, "Recording Stopped", reason)
+
+    # Summary: Update the image-label border to indicate whether recording is active.
+    # What it does: Keeps the label's original stylesheet (including background color) and conditionally
+    # adds/removes a thick red border for recording status feedback.
+    # Input: `self`, `active` (bool).
+    # Returns: `None`.
+    def _set_bmode_recording_indicator(self, active: bool) -> None:
+        # Use the cached base style so we never overwrite the .ui-defined background color.
+        base_stylesheet = self._bmode_image_label_base_stylesheet.strip()
+        if active:
+            # Add a thick red border while preserving any existing base style declarations.
+            if base_stylesheet:
+                indicator_stylesheet = (
+                    f"{base_stylesheet.rstrip(';')}; border: 6px solid rgb(255, 0, 0);"
+                )
+            else:
+                indicator_stylesheet = "border: 6px solid rgb(255, 0, 0);"
+            self.ui.label_bmode_image.setStyleSheet(indicator_stylesheet)
+            return
+
+        # Restore the exact original style when recording is not active.
+        self.ui.label_bmode_image.setStyleSheet(base_stylesheet)
 
     # Summary:
     # - Start an externally-controlled image recording session.
@@ -1390,9 +1418,18 @@ class BModeWidget(QWidget):
     # Input: `self`, `pixmap` (the image to show).
     # Returns: `None`.
     def _display_pixmap(self, pixmap: QPixmap) -> None:
-        # Scale the pixmap to the label with the same style as camera frames.
+        # Use the label content rect (inside stylesheet border) to prevent size-hint feedback loops.
+        target_size = self.ui.label_bmode_image.contentsRect().size()
+        # Fall back to full label size if content rect is transiently empty during layout updates.
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            target_size = self.ui.label_bmode_image.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            # Skip drawing until the widget has a valid render area.
+            return
+
+        # Scale the pixmap to the available content area while keeping the image aspect ratio.
         scaled = pixmap.scaled(
-            self.ui.label_bmode_image.size(),
+            target_size,
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
         )
