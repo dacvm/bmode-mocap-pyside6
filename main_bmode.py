@@ -1066,13 +1066,28 @@ class BModeWidget(QWidget):
         # Use the cached base style so we never overwrite the .ui-defined background color.
         base_stylesheet = self._bmode_image_label_base_stylesheet.strip()
         if active:
-            # Add a thick red border while preserving any existing base style declarations.
-            if base_stylesheet:
+            # Keep Qt syntax valid by producing selector-based rules when we add scoped selectors.
+            selector = "#label_bmode_image"
+            child_reset_rule = f"{selector} * {{ border: 0px; }}"
+            if "{" in base_stylesheet and "}" in base_stylesheet:
+                # If the base style already contains full selector rules, append the border rule directly.
                 indicator_stylesheet = (
-                    f"{base_stylesheet.rstrip(';')}; border: 6px solid rgb(255, 0, 0);"
+                    f"{base_stylesheet}\n"
+                    f"{selector} {{ border: 6px solid rgb(255, 0, 0); }}\n"
+                    f"{child_reset_rule}"
+                )
+            elif base_stylesheet:
+                # Convert property-only declarations into a selector block before adding the border.
+                normalized_base = base_stylesheet.rstrip(";")
+                indicator_stylesheet = (
+                    f"{selector} {{ {normalized_base}; border: 6px solid rgb(255, 0, 0); }}\n"
+                    f"{child_reset_rule}"
                 )
             else:
-                indicator_stylesheet = "border: 6px solid rgb(255, 0, 0);"
+                indicator_stylesheet = (
+                    f"{selector} {{ border: 6px solid rgb(255, 0, 0); }}\n"
+                    f"{child_reset_rule}"
+                )
             self.ui.label_bmode_image.setStyleSheet(indicator_stylesheet)
             return
 

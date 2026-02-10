@@ -1155,6 +1155,10 @@ class MocapWidget(QWidget):
         self.ui.setupUi(self)
         # Set a stable objectName so slot naming can follow project conventions.
         self.setObjectName("mocapWidget")
+        # Cache the original mocap plot-container stylesheet so recording indicator changes are reversible.
+        self._mocap_matplotlib_base_stylesheet = (
+            self.ui.widget_mocap_matplotlib.styleSheet()
+        )
 
         # Keep the text area readable but non-editable for incoming stream data.
         self.ui.plainTextEdit_mocap_textStream.setReadOnly(True)
@@ -1676,6 +1680,8 @@ class MocapWidget(QWidget):
         self.ui.pushButton_mocap_recorddirClear.setEnabled(False)
         # UI state change: update the record button to show stop intent.
         self.ui.pushButton_mocap_record.setText("Stop Recording")
+        # UI state change: show a clear visual indicator around the mocap plot while recording is active.
+        self._set_mocap_recording_indicator(active=True)
         # Provide immediate feedback about the active recording file.
         self.ui.plainTextEdit_mocap_textStream.setPlainText(
             f"Recording to {record_file_path}"
@@ -1699,12 +1705,42 @@ class MocapWidget(QWidget):
         self.ui.pushButton_mocap_recorddirClear.setEnabled(True)
         # UI state change: restore the record button text.
         self.ui.pushButton_mocap_record.setText("Record")
+        # UI state change: remove the recording indicator and restore the original plot-container style.
+        self._set_mocap_recording_indicator(active=False)
         # Keep the record button enabled only while streaming.
         self.ui.pushButton_mocap_record.setEnabled(self._stream_state == "streaming")
 
         # Show the stop reason so the user understands why recording ended.
         if reason:
             self.ui.plainTextEdit_mocap_textStream.setPlainText(reason)
+
+    # Summary:
+    # - Update the mocap plot-container border to indicate whether recording is active.
+    # - What it does: Preserves the original container stylesheet and conditionally adds/removes
+    #   a thick red border for clear recording status feedback.
+    # - Input: `self`, `active` (bool).
+    # - Returns: None.
+    def _set_mocap_recording_indicator(self, active: bool) -> None:
+        # Use the cached base style so we can always restore exactly what existed before recording.
+        base_stylesheet = self._mocap_matplotlib_base_stylesheet.strip()
+        if active:
+            # Scope the border rule to the container objectName so child widgets do not inherit it.
+            scoped_indicator_rule = (
+                "#widget_mocap_matplotlib { border: 6px solid rgb(255, 0, 0); }"
+                "#widget_mocap_matplotlib * { border: 0px; }"
+            )
+            # Preserve any existing base declarations by appending the scoped indicator rules.
+            if base_stylesheet:
+                indicator_stylesheet = (
+                    f"{base_stylesheet.rstrip(';')}; {scoped_indicator_rule}"
+                )
+            else:
+                indicator_stylesheet = scoped_indicator_rule
+            self.ui.widget_mocap_matplotlib.setStyleSheet(indicator_stylesheet)
+            return
+
+        # Restore the original container style when recording is not active.
+        self.ui.widget_mocap_matplotlib.setStyleSheet(base_stylesheet)
 
     # Summary:
     # - Ensure the streaming thread is stopped before the widget closes.
