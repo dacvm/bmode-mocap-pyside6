@@ -1743,6 +1743,16 @@ class MocapWidget(QWidget):
         self.ui.widget_mocap_matplotlib.setStyleSheet(base_stylesheet)
 
     # Summary:
+    # - Set the mocap recording indicator from an external controller.
+    # - What it does: Exposes a small public API so parent windows can toggle the same indicator
+    #   used by this widget's local record button without duplicating stylesheet logic.
+    # - Input: `self`, `active` (bool).
+    # - Returns: None.
+    def set_recording_indicator(self, active: bool) -> None:
+        # WHY: Keep indicator style ownership inside this widget even when recording is started elsewhere.
+        self._set_mocap_recording_indicator(active=active)
+
+    # Summary:
     # - Ensure the streaming thread is stopped before the widget closes.
     # - Input: `self`, `event` (Qt close event).
     # - Returns: None.

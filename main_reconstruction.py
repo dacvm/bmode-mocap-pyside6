@@ -151,6 +151,17 @@ class MainWindow(QMainWindow):
         self._update_coupled_debug_status()
 
     # Summary:
+    # - Toggle both embedded recording indicators for coupled recording state.
+    # - What it does: Routes one active/inactive state to both child widgets so the
+    #   reconstruction flow has one place to control recording borders.
+    # - Input: `self`, `active` (bool).
+    # - Returns: None.
+    def _set_coupled_recording_indicators(self, active: bool) -> None:
+        # WHY: Keep coupled-record indicator control centralized to avoid mismatched UI states.
+        self._bmode_widget.set_recording_indicator(active=active)
+        self._mocap_widget.set_recording_indicator(active=active)
+
+    # Summary:
     # - Slot function for B-mode stream-state updates from the embedded B-mode widget.
     # - What it does: Keeps the reconstruction status label synchronized with stream start/stop.
     # - Input: `self`, `is_running` (bool), `message` (str).
@@ -194,6 +205,8 @@ class MainWindow(QMainWindow):
                 )
             # UI state change: restore record button text after forced stop.
             self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+            # UI state change: clear both embedded recording borders after forced .mha stop.
+            self._set_coupled_recording_indicators(active=False)
 
     # Summary:
     # - Slot function for mocap stream-state updates from the embedded mocap widget.
@@ -239,6 +252,8 @@ class MainWindow(QMainWindow):
                 )
             # UI state change: restore record button text after forced stop.
             self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+            # UI state change: clear both embedded recording borders after forced .mha stop.
+            self._set_coupled_recording_indicators(active=False)
 
     # Summary:
     # - Slot function for B-mode recording stop events from the embedded B-mode widget.
@@ -305,6 +320,8 @@ class MainWindow(QMainWindow):
 
         # UI state change: restore the record button text after stopping.
         self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+        # UI state change: clear both embedded recording borders once delayed stop is fully finalized.
+        self._set_coupled_recording_indicators(active=False)
 
         # Build a status message that includes the saved output locations.
         if reason:
@@ -354,6 +371,8 @@ class MainWindow(QMainWindow):
                 )
                 # UI state change: reflect that recording is no longer active.
                 self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+                # UI state change: clear both embedded recording borders because .mha recording ended.
+                self._set_coupled_recording_indicators(active=False)
                 QMessageBox.warning(
                     self,
                     "MHA Write Error",
@@ -466,6 +485,8 @@ class MainWindow(QMainWindow):
 
         # UI state change: show stop intent while image+csv recording is active.
         self.ui.pushButton_coupledrecord_recordStream.setText("Stop Recording")
+        # UI state change: show both embedded recording borders only after both recorders started.
+        self._set_coupled_recording_indicators(active=True)
         # UI state change: show the active session directory in the status bar.
         self.statusBar().showMessage(
             f"Recording image+csv in session: {session_dir}",
@@ -563,6 +584,8 @@ class MainWindow(QMainWindow):
             )
             # UI state change: restore button text when recording stops.
             self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+            # UI state change: clear both embedded recording borders after .mha recording stops.
+            self._set_coupled_recording_indicators(active=False)
             if final_path:
                 self.statusBar().showMessage(
                     f"Coupled recording saved to: {final_path}",
@@ -656,6 +679,8 @@ class MainWindow(QMainWindow):
         self._latest_coupled_diff_ms = None
         # UI state change: show stop intent while coupled recording is active.
         self.ui.pushButton_coupledrecord_recordStream.setText("Stop Recording")
+        # UI state change: show both embedded recording borders while .mha recording is active.
+        self._set_coupled_recording_indicators(active=True)
         # UI state change: provide immediate debug text for active mode/session.
         self.statusBar().showMessage(
             f"Coupled recording started ({selected_mode}). Waiting for coupled packets..."
@@ -744,6 +769,8 @@ class MainWindow(QMainWindow):
             )
         # UI state change: restore record button text on shutdown.
         self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+        # UI state change: final safety reset for both embedded recording borders on shutdown.
+        self._set_coupled_recording_indicators(active=False)
 
         # Delegate to Qt's default close handling after local cleanup.
         super().closeEvent(event)

@@ -1095,6 +1095,16 @@ class BModeWidget(QWidget):
         self.ui.label_bmode_image.setStyleSheet(base_stylesheet)
 
     # Summary:
+    # - Set the B-mode recording indicator from an external controller.
+    # - What it does: Exposes a small public API so parent windows can toggle the same indicator
+    #   used by this widget's local record button without duplicating stylesheet logic.
+    # - Input: `self`, `active` (bool).
+    # - Returns: None.
+    def set_recording_indicator(self, active: bool) -> None:
+        # WHY: Keep indicator style ownership inside this widget even when recording is started elsewhere.
+        self._set_bmode_recording_indicator(active=active)
+
+    # Summary:
     # - Start an externally-controlled image recording session.
     # - What it does: Starts the image writer thread and marks external mode so snapshots can be driven
     #   by mocap timestamps instead of every incoming frame.
