@@ -99,9 +99,15 @@ class CameraStreamWorker:
 
     # Summary:
     # - Start the camera acquisition thread.
-    # - Input: `self`, `camera_index` (int), `fps` (int; used as ms interval).
+    # - Input: `self`, `camera_index` (int), `fps` (int; used as ms interval),
+    #   `clip_rect` (tuple[int, int, int, int] | None) for optional calibrated cropping.
     # - Returns: None.
-    def start(self, camera_index: int, fps: int = 33) -> None:
+    def start(
+        self,
+        camera_index: int,
+        fps: int = 33,
+        clip_rect: Optional[tuple[int, int, int, int]] = None,
+    ) -> None:
         # Guard against double-starts to keep the worker repeat-safe.
         with self._lock:
             if self._active:
@@ -114,7 +120,7 @@ class CameraStreamWorker:
             # Start the background thread so camera I/O never blocks the UI thread.
             self._thread = threading.Thread(
                 target=self._run,
-                args=(int(camera_index), int(fps), self._stop_event),
+                args=(int(camera_index), int(fps), self._stop_event, clip_rect),
                 daemon=True,
             )
             # Thread start: kick off the worker loop.
@@ -160,9 +166,16 @@ class CameraStreamWorker:
 
     # Summary:
     # - Worker loop that opens the camera and streams frames until stopped.
-    # - Input: `self`, `camera_index` (int), `fps` (int), `stop_event` (threading.Event).
+    # - Input: `self`, `camera_index` (int), `fps` (int), `stop_event` (threading.Event),
+    #   `clip_rect` (tuple[int, int, int, int] | None) for optional calibrated cropping.
     # - Returns: None.
-    def _run(self, camera_index: int, fps: int, stop_event: threading.Event) -> None:
+    def _run(
+        self,
+        camera_index: int,
+        fps: int,
+        stop_event: threading.Event,
+        clip_rect: Optional[tuple[int, int, int, int]],
+    ) -> None:
         # Open the camera inside the worker thread to keep the UI responsive.
         cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         self._cap = cap
@@ -182,6 +195,23 @@ class CameraStreamWorker:
             with self._lock:
                 self._active = False
             return
+
+        # Validate crop size early so invalid calibration data fails before the loop starts.
+        clip_origin_x = 0
+        clip_origin_y = 0
+        clip_width = 0
+        clip_height = 0
+        if clip_rect is not None:
+            clip_origin_x, clip_origin_y, clip_width, clip_height = clip_rect
+            if clip_width <= 0 or clip_height <= 0:
+                self._safe_emit(
+                    self._proxy.error_message.emit,
+                    "Invalid clip rectangle size detected. The stream has been closed.",
+                )
+                self._safe_emit(self._proxy.state_changed.emit, False, "camera failed")
+                with self._lock:
+                    self._active = False
+                return
 
         # Notify the UI that camera streaming is active.
         self._safe_emit(self._proxy.state_changed.emit, True, "camera streaming")
@@ -203,6 +233,25 @@ class CameraStreamWorker:
 
                 # Convert camera frames to single-channel uint8 because reconstruction expects grayscale.
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+                # Apply calibration crop only when the user provided a calibration file.
+                if clip_rect is not None:
+                    frame_height, frame_width = gray.shape
+                    clip_end_x = clip_origin_x + clip_width
+                    clip_end_y = clip_origin_y + clip_height
+                    # Strict bounds mode: fail the stream when the configured crop leaves frame bounds.
+                    if (
+                        clip_origin_x < 0
+                        or clip_origin_y < 0
+                        or clip_end_x > frame_width
+                        or clip_end_y > frame_height
+                    ):
+                        self._safe_emit(
+                            self._proxy.error_message.emit,
+                            "Calibration crop rectangle is outside camera frame bounds. The stream has been closed.",
+                        )
+                        break
+                    gray = gray[clip_origin_y:clip_end_y, clip_origin_x:clip_end_x]
                 height, width = gray.shape
 
                 # Package the grayscale frame so the UI thread can render safely.
@@ -802,7 +851,7 @@ class BModeWidget(QWidget):
     # Input: `self`, `text` (the current stream option label from the combo box).
     # Returns: `None`.
     def _on_comboBox_bmode_streamOption_changed(self, text: str) -> None:
-        """Disable the port selector when the user picks the Other screen option."""
+        """Disable the port selector when the user picks screen streaming on this PC."""
         # When streaming to the PC screen, we do not need a camera index, so gray out the selector.
         self.ui.comboBox_bmode_streamPort.setEnabled(text != "Stream Screen (This PC)")
 
@@ -816,10 +865,10 @@ class BModeWidget(QWidget):
             self._stop_stream()
             return
 
-        # If the user selected the "Stream Screen" option, ensure the calibration path is set.
+        # If the user selected local screen streaming, ensure the calibration path is set.
         stream_option = self.ui.comboBox_bmode_streamOption.currentText()
         calib_path = self.ui.lineEdit_bmode_calibPath.text().strip()
-        if stream_option != "Stream Image" and not calib_path:
+        if stream_option == "Stream Screen (This PC)" and not calib_path:
             QMessageBox.warning(
                 self,
                 "Calibration Path Missing",
@@ -879,29 +928,68 @@ class BModeWidget(QWidget):
         # can read and use this calibration file.
         self.ui.lineEdit_bmode_calibPath.setText(file_path)
 
-        # Parse the XML file to extract the clip rectangle parameters.
-        parser = XmlStreamParser(str(file_path))
-        parser.register(VideoDeviceExtractor())
-        data = parser.parse()
+        # Parse and validate the selected calibration so the screen stream can reuse the clip rectangle.
+        try:
+            self._screen_rect = self._load_clip_rectangle_from_calibration_path(file_path)
+        except ValueError as error:
+            QMessageBox.warning(
+                self,
+                "Calibration Error",
+                str(error),
+            )
+            self._screen_rect = None
+            return
 
-        # Get the ClipRectangleOrigin and ClipRectangleSize.
+    # Summary: Load and validate the clip rectangle from a calibration XML path.
+    # What it does: Parses the file using XmlStreamParser and returns
+    # `(origin_x, origin_y, size_width, size_height)` for stream cropping.
+    # Input: `self`, `calibration_path` (str; path to the calibration XML file).
+    # Returns: `tuple[int, int, int, int]` with clip rectangle values.
+    # Raises: `ValueError` when the file cannot be parsed or does not contain valid clip rectangle values.
+    def _load_clip_rectangle_from_calibration_path(
+        self, calibration_path: str
+    ) -> tuple[int, int, int, int]:
+        # Validate early so callers get a clear message instead of a parser stack trace.
+        normalized_path = calibration_path.strip()
+        if not normalized_path:
+            raise ValueError("Calibration path is empty.")
+
+        # Parse the XML and extract only the VideoDevice attributes needed for clipping.
+        parser = XmlStreamParser(str(normalized_path))
+        parser.register(VideoDeviceExtractor())
+        try:
+            data = parser.parse()
+        except Exception as error:
+            # Convert parser/file failures into a user-friendly calibration error.
+            raise ValueError(
+                f"Failed to read the selected calibration file: {error}"
+            ) from error
+
+        # Read clip rectangle fields from the extracted VideoDevice attributes.
         video_device = data.get("VideoDevice") or {}
         video_device_attrib = video_device.get("attrib") or {}
         clip_rectangle_origin = video_device_attrib.get("ClipRectangleOrigin")
         clip_rectangle_size = video_device_attrib.get("ClipRectangleSize")
         if not clip_rectangle_origin or not clip_rectangle_size:
-            QMessageBox.warning(
-                self,
-                "Calibration Error",
-                "Clip rectangle origin/size is missing in the selected calibration file.",
+            raise ValueError(
+                "Clip rectangle origin/size is missing in the selected calibration file."
             )
-            self._screen_rect = None
-            return
-        # Convert the string coordinates into integers for capture.
-        origin_x, origin_y = map(int, clip_rectangle_origin.split())
-        size_width, size_height = map(int, clip_rectangle_size.split())
-        # Cache the rectangle so screen streaming can reuse it.
-        self._screen_rect = (origin_x, origin_y, size_width, size_height)
+
+        # Convert the space-separated coordinates into integer values.
+        try:
+            origin_x, origin_y = map(int, clip_rectangle_origin.split())
+            size_width, size_height = map(int, clip_rectangle_size.split())
+        except ValueError as error:
+            raise ValueError(
+                "Clip rectangle origin/size values are invalid in the selected calibration file."
+            ) from error
+
+        # Reject non-positive sizes because streams require a non-empty crop region.
+        if size_width <= 0 or size_height <= 0:
+            raise ValueError(
+                "Clip rectangle size must be greater than zero in the selected calibration file."
+            )
+        return (origin_x, origin_y, size_width, size_height)
 
     # Summary: Slot function that clears the calibration path and related cached screen settings.
     # What it does: Removes the calibration file path from the UI and clears any data that depends on it.
@@ -1163,11 +1251,18 @@ class BModeWidget(QWidget):
         stream_option = self.ui.comboBox_bmode_streamOption.currentText()
         if stream_option == "Stream Image":
             self._start_camera_stream()
-        else:
+        elif stream_option == "Stream Screen (This PC)":
             self._start_screen_stream()
+        else:
+            # Defensive guard: unknown option text should fail safely and guide the user.
+            QMessageBox.warning(
+                self,
+                "Unknown Stream Option",
+                f"Unsupported stream option selected: {stream_option}",
+            )
 
     # Summary: Start streaming frames from the selected camera.
-    # What it does: Resolves the camera index and asks the camera worker to start streaming.
+    # What it does: Resolves the camera index, loads optional calibration crop data, and starts the camera worker.
     # Input: `self`.
     # Returns: `None`.
     def _start_camera_stream(self) -> None:
@@ -1177,8 +1272,29 @@ class BModeWidget(QWidget):
         if selected_index is None:
             selected_index = self.ui.comboBox_bmode_streamPort.currentIndex()
 
+        # Read the optional calibration path so camera streaming can crop when a file is provided.
+        calib_path = self.ui.lineEdit_bmode_calibPath.text().strip()
+        camera_clip_rect: Optional[tuple[int, int, int, int]] = None
+        if calib_path:
+            # Validate and convert calibration clip values before starting the worker.
+            try:
+                camera_clip_rect = self._load_clip_rectangle_from_calibration_path(
+                    calib_path
+                )
+            except ValueError as error:
+                QMessageBox.warning(
+                    self,
+                    "Calibration Error",
+                    str(error),
+                )
+                return
+
         # Start the camera worker; it will emit state changes and frames via the proxy.
-        self._camera_worker.start(int(selected_index), fps=33)
+        self._camera_worker.start(
+            int(selected_index),
+            fps=33,
+            clip_rect=camera_clip_rect,
+        )
 
     # Summary: Start streaming a calibrated region from the local screen.
     # What it does: Requires calibration rectangle data, asks the user which screen to use, then starts the worker.
