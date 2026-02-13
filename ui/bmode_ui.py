@@ -33,7 +33,6 @@ class Ui_Form(object):
         self.comboBox_bmode_streamOption = QComboBox(Form)
         self.comboBox_bmode_streamOption.addItem("")
         self.comboBox_bmode_streamOption.addItem("")
-        self.comboBox_bmode_streamOption.addItem("")
         self.comboBox_bmode_streamOption.setObjectName(u"comboBox_bmode_streamOption")
 
         self.verticalLayout_bmode_menu.addWidget(self.comboBox_bmode_streamOption)
@@ -134,8 +133,7 @@ class Ui_Form(object):
     def retranslateUi(self, Form):
         Form.setWindowTitle(QCoreApplication.translate("Form", u"Form", None))
         self.comboBox_bmode_streamOption.setItemText(0, QCoreApplication.translate("Form", u"Stream Image", None))
-        self.comboBox_bmode_streamOption.setItemText(1, QCoreApplication.translate("Form", u"Stream Screen (Other)", None))
-        self.comboBox_bmode_streamOption.setItemText(2, QCoreApplication.translate("Form", u"Stream Screen (This PC)", None))
+        self.comboBox_bmode_streamOption.setItemText(1, QCoreApplication.translate("Form", u"Stream Screen (This PC)", None))
 
         self.comboBox_bmode_streamPort.setPlaceholderText(QCoreApplication.translate("Form", u"Select USB Port", None))
         self.lineEdit_bmode_calibPath.setPlaceholderText(QCoreApplication.translate("Form", u"~/config.xml", None))

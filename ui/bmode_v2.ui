@@ -27,11 +27,6 @@
          </item>
          <item>
           <property name="text">
-           <string>Stream Screen (Other)</string>
-          </property>
-         </item>
-         <item>
-          <property name="text">
            <string>Stream Screen (This PC)</string>
           </property>
          </item>
