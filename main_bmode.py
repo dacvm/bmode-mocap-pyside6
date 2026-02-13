@@ -18,7 +18,7 @@ from typing import Optional
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, Signal, QTimer, Qt
-from PySide6.QtGui import QGuiApplication, QImage, QPixmap, QScreen
+from PySide6.QtGui import QGuiApplication, QImage, QPixmap, QScreen, QTextCursor
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QWidget
 
 # Generated UI classes that wrap the Qt Designer forms into Python-friendly fields.
@@ -1084,8 +1084,24 @@ class BModeWidget(QWidget):
         super().__init__()  # Call the QWidget constructor to initialize Qt internals.
         self.ui = Ui_BModeV2()  # Instantiate the generated UI helper for the V2 layout.
         self.ui.setupUi(self)  # Wire the widgets from the .ui file to this QWidget instance.
+        # UI state change: keep the text stream read-only so it behaves like a status/event console.
+        self.ui.plainTextEdit_bmode_textStream.setReadOnly(True)
+        # UI state change: disable undo history because logs are append-only and should stay lightweight.
+        self.ui.plainTextEdit_bmode_textStream.setUndoRedoEnabled(False)
+        # UI state change: force stylesheet background/border painting on this QLabel container.
+        # WHY: some QWidget/QLabel styles render inconsistently without WA_StyledBackground enabled.
+        self.ui.label_bmode_image.setAttribute(Qt.WA_StyledBackground, True)
         # Cache the original image-label stylesheet so recording indicator changes keep the base background color.
         self._bmode_image_label_base_stylesheet = self.ui.label_bmode_image.styleSheet()
+        # Keep a fixed border thickness for the recording indicator to avoid magic numbers in style updates.
+        self._bmode_recording_indicator_border_px = 6
+        # UI state change: reserve border space from startup with a transparent border.
+        # WHY: this prevents layout/size-hint growth when recording turns the border red.
+        self.ui.label_bmode_image.setStyleSheet(
+            self._build_bmode_recording_indicator_stylesheet(
+                border_color="rgba(255, 0, 0, 0)"
+            )
+        )
 
         # Cache the calibration-derived screen rectangle used for screen streaming.
         self._screen_rect: Optional[tuple[int, int, int, int]] = None
@@ -1106,6 +1122,17 @@ class BModeWidget(QWidget):
         self._is_streaming = False
         # Track external recording mode so image saving can be driven by mocap timestamps.
         self._external_recording_active = False
+        # Keep the text stream bounded so long sessions do not grow the widget memory without limit.
+        self._textstream_max_lines = 200
+        # Track the most recent formatted line to debounce repeated worker-state events.
+        self._last_textstream_line = ""
+        self._last_textstream_line_ts = 0.0
+        # Track a small health window so we can report stream FPS without per-frame log spam.
+        self._health_window_start_ts = time.monotonic()
+        self._health_window_frame_count = 0
+        # Track health-log cadence separately so rate-limiting follows the same pattern as mocap.
+        self._last_health_log_ts = 0.0
+        self._health_log_interval_sec = 1.0
 
         # Timer to throttle rendering so the UI thread stays responsive.
         self._display_timer = QTimer(self)
@@ -1161,6 +1188,171 @@ class BModeWidget(QWidget):
         self.ui.pushButton_bmode_recordStream.clicked.connect(
             self._on_pushButton_bmode_recordStream_clicked
         )
+        # Initial feedback: make the first state explicit so users know how to begin.
+        self._log_bmode_event(
+            "info",
+            level="INFO",
+            message="Idle. Select stream source and press Open Stream.",
+        )
+
+    # Summary: Append a single formatted line to the B-mode text stream.
+    # What it does: Prefixes each message with local time/level and trims old lines to keep memory stable.
+    # Input: `self`, `level` (str), `message` (str).
+    # Returns: `None`.
+    def _append_bmode_textstream(self, level: str, message: str) -> None:
+        # Normalize and ignore empty messages so log output stays concise and useful.
+        message_text = str(message).strip()
+        if not message_text:
+            return
+
+        # Build a consistent line format that is easy to scan during live streaming.
+        timestamp_text = datetime.now().strftime("%H:%M:%S")
+        level_text = (level or "INFO").upper()
+        formatted_line = f"[{timestamp_text}] [{level_text}] {message_text}"
+        self.ui.plainTextEdit_bmode_textStream.appendPlainText(formatted_line)
+
+        # Trim old lines from the top so the text widget remains bounded over long sessions.
+        document = self.ui.plainTextEdit_bmode_textStream.document()
+        while document.blockCount() > int(self._textstream_max_lines):
+            cursor = QTextCursor(document)
+            cursor.movePosition(QTextCursor.Start)
+            cursor.select(QTextCursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            # Remove the leftover newline after deleting the first block.
+            cursor.deleteChar()
+
+        # Keep the latest line visible after append/trim so the console behaves like a live activity feed.
+        cursor = self.ui.plainTextEdit_bmode_textStream.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.ui.plainTextEdit_bmode_textStream.setTextCursor(cursor)
+        self.ui.plainTextEdit_bmode_textStream.ensureCursorVisible()
+
+    # Summary: Build and log a generic B-mode event message for the text stream.
+    # What it does: Converts structured event context into one human-readable line and applies duplicate debouncing.
+    # Input: `self`, `event` (str), `level` (str), `context` (keyword context fields).
+    # Returns: `None`.
+    def _log_bmode_event(self, event: str, *, level: str = "INFO", **context) -> None:
+        # Normalize the event key so callers can pass stable, case-insensitive identifiers.
+        event_key = str(event).strip().lower()
+        message_text = ""
+
+        # Build stream-start/stop request messages with source-specific context.
+        if event_key == "stream_request":
+            action = str(context.get("action", "start")).strip().lower() or "start"
+            source = str(context.get("source", "unknown")).strip().lower() or "unknown"
+            detail_parts: list[str] = []
+            if source == "camera":
+                camera_index = context.get("camera_index")
+                if camera_index is not None:
+                    detail_parts.append(f"camera={camera_index}")
+            if source == "screen":
+                screen_name = str(context.get("screen_name", "")).strip()
+                if screen_name:
+                    detail_parts.append(f"screen={screen_name}")
+                screen_size = str(context.get("screen_size", "")).strip()
+                if screen_size:
+                    detail_parts.append(f"size={screen_size}")
+            clip_rect = context.get("clip_rect")
+            if clip_rect is not None:
+                detail_parts.append(f"clip={clip_rect}")
+            details_text = f" ({', '.join(detail_parts)})" if detail_parts else ""
+            message_text = f"Stream {action} requested: {source}{details_text}."
+
+        # Build stream running-state messages from worker signals.
+        elif event_key == "stream_state":
+            state_text = "started" if bool(context.get("is_running", False)) else "stopped"
+            reason_text = str(context.get("reason", "")).strip()
+            if reason_text:
+                message_text = f"Stream {state_text}: {reason_text}."
+            else:
+                message_text = f"Stream {state_text}."
+
+        # Build recording start messages with destination and mode details.
+        elif event_key == "record_start":
+            mode_text = str(context.get("mode", "local")).strip() or "local"
+            target_text = str(context.get("target", "")).strip()
+            if not target_text:
+                target_text = str(context.get("session_dir", "")).strip()
+            if target_text:
+                message_text = f"Recording started ({mode_text}) -> {target_text}."
+            else:
+                message_text = f"Recording started ({mode_text})."
+
+        # Build recording stop messages with a clear reason when available.
+        elif event_key == "record_stop":
+            reason_text = str(context.get("reason", "")).strip()
+            if reason_text:
+                message_text = f"Recording stopped: {reason_text}"
+            else:
+                message_text = "Recording stopped."
+
+        # Build compact health snapshots from stream-health logic.
+        elif event_key == "stream_health":
+            message_text = str(context.get("message", "")).strip()
+
+        # Build generic informational and warning/error messages.
+        elif event_key in {"warning", "error", "info"}:
+            message_text = str(context.get("message", "")).strip()
+
+        # Fallback formatting: include event name and structured key/value fields.
+        else:
+            detail_parts = [f"{key}={context[key]}" for key in sorted(context.keys())]
+            details_text = f"({', '.join(detail_parts)})" if detail_parts else ""
+            message_text = f"Event {event_key}{details_text}"
+
+        # Skip blank messages so malformed event context does not create empty rows.
+        if not message_text:
+            return
+
+        # Debounce identical consecutive messages so repeated worker callbacks do not flood the UI.
+        now_ts = time.monotonic()
+        line_key = f"{(level or 'INFO').upper()}::{message_text}"
+        if line_key == self._last_textstream_line and (
+            now_ts - self._last_textstream_line_ts
+        ) < 1.0:
+            return
+        self._last_textstream_line = line_key
+        self._last_textstream_line_ts = now_ts
+        self._append_bmode_textstream(level, message_text)
+
+    # Summary: Log periodic stream health snapshots at a fixed cadence.
+    # What it does: Rate-limits health logs, builds one compact status line, and avoids per-frame text spam.
+    # Input: `self`.
+    # Returns: `None`.
+    def _log_stream_health(self) -> None:
+        # Only emit health snapshots while stream state is active.
+        if not self._is_streaming:
+            return
+        if self._health_window_frame_count <= 0:
+            return
+
+        # Rate-limit health lines with a dedicated timestamp gate to avoid per-frame text spam.
+        now_ts = time.monotonic()
+        if (now_ts - self._last_health_log_ts) < self._health_log_interval_sec:
+            return
+        self._last_health_log_ts = now_ts
+
+        # Keep using the rolling frame window to estimate observed stream cadence.
+        elapsed = now_ts - self._health_window_start_ts
+        if elapsed <= 0.0:
+            return
+
+        # Convert sampled frames into an FPS estimate for this health window.
+        fps_estimate = self._health_window_frame_count / elapsed
+
+        # Reset the rolling window after each emitted health snapshot.
+        frame_count = int(self._health_window_frame_count)
+        self._health_window_start_ts = now_ts
+        self._health_window_frame_count = 0
+
+        # Build a compact health line that mirrors the mocap status style.
+        recording_text = "on" if self._image_record_worker.is_active() else "off"
+        health_line = (
+            "Stream OK | "
+            f"FPS~{fps_estimate:.1f} | "
+            f"REC={recording_text}"
+        )
+        self._log_bmode_event("stream_health", level="INFO", message=health_line)
 
     # Summary: Scan for available cameras and show them in the dropdown.
     # What it does: Tries a small set of camera indices and adds the ones that open successfully.
@@ -1198,6 +1390,20 @@ class BModeWidget(QWidget):
     def _on_pushButton_bmode_openStream_clicked(self) -> None:
         # If we are already streaming, stop immediately so the button is repeat-safe.
         if self._is_streaming:
+            # Normalize source labels so stop requests use the same camera/screen vocabulary as start requests.
+            source_text = "camera"
+            if (
+                self.ui.comboBox_bmode_streamOption.currentText()
+                == "Stream Screen (This PC)"
+            ):
+                source_text = "screen"
+            # Log user intent so stop actions are visible in the text stream history.
+            self._log_bmode_event(
+                "stream_request",
+                level="INFO",
+                action="stop",
+                source=source_text,
+            )
             self._stop_stream()
             return
 
@@ -1205,6 +1411,12 @@ class BModeWidget(QWidget):
         stream_option = self.ui.comboBox_bmode_streamOption.currentText()
         calib_path = self.ui.lineEdit_bmode_calibPath.text().strip()
         if stream_option == "Stream Screen (This PC)" and not calib_path:
+            # Log the validation failure so users can see why stream start was rejected.
+            self._log_bmode_event(
+                "warning",
+                level="WARN",
+                message="Calibration path is required before streaming the screen.",
+            )
             QMessageBox.warning(
                 self,
                 "Calibration Path Missing",
@@ -1214,6 +1426,12 @@ class BModeWidget(QWidget):
 
         # Ensure we have at least one camera entry to use when streaming the camera.
         if stream_option == "Stream Image" and self.ui.comboBox_bmode_streamPort.count() == 0:
+            # Log missing hardware so users have a persistent explanation in the text stream.
+            self._log_bmode_event(
+                "warning",
+                level="WARN",
+                message="No camera ports were detected. Plug in a camera and try again.",
+            )
             QMessageBox.warning(
                 self,
                 "No Camera Found",
@@ -1388,6 +1606,12 @@ class BModeWidget(QWidget):
     def _start_recording(self) -> None:
         # Require an active stream so recordings stay aligned to live frames.
         if not self._is_streaming:
+            # Log validation feedback so users can review why recording did not start.
+            self._log_bmode_event(
+                "warning",
+                level="WARN",
+                message="Start streaming before recording.",
+            )
             QMessageBox.warning(
                 self,
                 "Stream Not Active",
@@ -1398,6 +1622,12 @@ class BModeWidget(QWidget):
         # Validate the record directory so we fail fast on missing paths.
         record_dir = self.ui.lineEdit_bmode_recorddir.text().strip()
         if not record_dir:
+            # Log missing path validation so users can see the required prerequisite.
+            self._log_bmode_event(
+                "warning",
+                level="WARN",
+                message="Please choose a record directory before recording.",
+            )
             QMessageBox.warning(
                 self,
                 "Missing Record Directory",
@@ -1412,6 +1642,12 @@ class BModeWidget(QWidget):
         try:
             os.makedirs(record_dir, exist_ok=True)
         except OSError:
+            # Log directory creation failures so users can inspect filesystem-related issues.
+            self._log_bmode_event(
+                "error",
+                level="ERROR",
+                message="The selected record directory could not be created.",
+            )
             QMessageBox.warning(
                 self,
                 "Record Directory Error",
@@ -1420,6 +1656,12 @@ class BModeWidget(QWidget):
             return
 
         if not os.path.isdir(record_dir):
+            # Log invalid path state so users can diagnose unexpected filesystem behavior.
+            self._log_bmode_event(
+                "error",
+                level="ERROR",
+                message="The selected record directory does not exist.",
+            )
             QMessageBox.warning(
                 self,
                 "Invalid Record Directory",
@@ -1427,6 +1669,12 @@ class BModeWidget(QWidget):
             )
             return
         if not os.access(record_dir, os.W_OK):
+            # Log permission issues so users know recording failed due to write access.
+            self._log_bmode_event(
+                "error",
+                level="ERROR",
+                message="The selected record directory is not writable.",
+            )
             QMessageBox.warning(
                 self,
                 "Record Directory Not Writable",
@@ -1436,8 +1684,14 @@ class BModeWidget(QWidget):
 
         # Start the writer thread so JPEG encoding and disk I/O stay off the UI thread.
         try:
-            self._image_record_worker.start(record_dir)
+            session_dir = self._image_record_worker.start(record_dir)
         except OSError:
+            # Log session creation failures to preserve the exact stop reason in text feedback.
+            self._log_bmode_event(
+                "error",
+                level="ERROR",
+                message="Failed to create the recording session directory.",
+            )
             QMessageBox.warning(
                 self,
                 "Record Directory Error",
@@ -1455,6 +1709,13 @@ class BModeWidget(QWidget):
         
         # UI state change: show a clear visual indicator on the image label while recording is active.
         self._set_bmode_recording_indicator(active=True)
+        # Log active recording destination so users can quickly find saved images.
+        self._log_bmode_event(
+            "record_start",
+            level="INFO",
+            mode="local",
+            target=session_dir,
+        )
 
     # Summary: Stop the active JPEG recording session and release writer resources.
     # What it does: Stops the background thread, restores UI controls, and reports any reason.
@@ -1479,49 +1740,67 @@ class BModeWidget(QWidget):
         # UI state change: restore the record button text.
         self.ui.pushButton_bmode_recordStream.setText("Record")
 
-        # UI state change: remove the recording indicator and restore the original label style.
+        # UI state change: hide the recording indicator while keeping reserved border space.
         self._set_bmode_recording_indicator(active=False)
+
+        # Log recording-stop feedback so users can see user stops and forced stops in one place.
+        stop_reason = reason.strip() if reason else "Recording stopped by user."
+        self._log_bmode_event(
+            "record_stop",
+            level="WARN" if reason else "INFO",
+            reason=stop_reason,
+        )
 
         # Show the stop reason so the user understands why recording ended.
         if reason:
             QMessageBox.warning(self, "Recording Stopped", reason)
 
+    # Summary:
+    # - Build the scoped stylesheet used by the B-mode recording indicator.
+    # - What it does: Preserves the original label style and appends a fixed-width border
+    #   whose color can be toggled between red (active) and transparent (idle).
+    # - Input: `self`, `border_color` (str).
+    # - Returns: Complete stylesheet string (str).
+    def _build_bmode_recording_indicator_stylesheet(self, border_color: str) -> str:
+        # Use the cached base style so the UI-defined background color remains unchanged.
+        base_stylesheet = self._bmode_image_label_base_stylesheet.strip()
+        selector = "#label_bmode_image"
+        # Keep border width fixed to reserve layout space in both idle and recording states.
+        border_rule = (
+            f"border: {self._bmode_recording_indicator_border_px}px solid {border_color};"
+        )
+        # Support selector-based base styles by appending a scoped override rule.
+        if "{" in base_stylesheet and "}" in base_stylesheet:
+            return f"{base_stylesheet}\n{selector} {{ {border_rule} }}"
+        # Support property-only base styles by wrapping them in the label selector.
+        if base_stylesheet:
+            normalized_base = base_stylesheet.rstrip(";")
+            return f"{selector} {{ {normalized_base}; {border_rule} }}"
+        # Fall back to border-only style when no base declarations exist.
+        return f"{selector} {{ {border_rule} }}"
+
     # Summary: Update the image-label border to indicate whether recording is active.
-    # What it does: Keeps the label's original stylesheet (including background color) and conditionally
-    # adds/removes a thick red border for recording status feedback.
+    # What it does: Keeps a fixed border width at all times, then toggles only border color
+    # between red (active) and transparent (idle) for stable layout geometry.
     # Input: `self`, `active` (bool).
     # Returns: `None`.
     def _set_bmode_recording_indicator(self, active: bool) -> None:
-        # Use the cached base style so we never overwrite the .ui-defined background color.
-        base_stylesheet = self._bmode_image_label_base_stylesheet.strip()
+        # Switch border color only, while keeping width fixed to avoid geometry jumps on toggle.
         if active:
-            # Keep Qt syntax valid by producing selector-based rules when we add scoped selectors.
-            selector = "#label_bmode_image"
-            child_reset_rule = f"{selector} * {{ border: 0px; }}"
-            if "{" in base_stylesheet and "}" in base_stylesheet:
-                # If the base style already contains full selector rules, append the border rule directly.
-                indicator_stylesheet = (
-                    f"{base_stylesheet}\n"
-                    f"{selector} {{ border: 6px solid rgb(255, 0, 0); }}\n"
-                    f"{child_reset_rule}"
+            # UI state change: make the reserved border visible during active recording.
+            self.ui.label_bmode_image.setStyleSheet(
+                self._build_bmode_recording_indicator_stylesheet(
+                    border_color="rgb(255, 0, 0)"
                 )
-            elif base_stylesheet:
-                # Convert property-only declarations into a selector block before adding the border.
-                normalized_base = base_stylesheet.rstrip(";")
-                indicator_stylesheet = (
-                    f"{selector} {{ {normalized_base}; border: 6px solid rgb(255, 0, 0); }}\n"
-                    f"{child_reset_rule}"
-                )
-            else:
-                indicator_stylesheet = (
-                    f"{selector} {{ border: 6px solid rgb(255, 0, 0); }}\n"
-                    f"{child_reset_rule}"
-                )
-            self.ui.label_bmode_image.setStyleSheet(indicator_stylesheet)
+            )
             return
 
-        # Restore the exact original style when recording is not active.
-        self.ui.label_bmode_image.setStyleSheet(base_stylesheet)
+        # UI state change: keep reserved space but hide the border when recording is not active.
+        self.ui.label_bmode_image.setStyleSheet(
+            self._build_bmode_recording_indicator_stylesheet(
+                border_color="rgba(255, 0, 0, 0)"
+            )
+        )
 
     # Summary:
     # - Set the B-mode recording indicator from an external controller.
@@ -1544,6 +1823,13 @@ class BModeWidget(QWidget):
         session_dir = self._image_record_worker.start(record_dir, queue_maxsize=0)
         # Track external state so per-frame auto recording is disabled.
         self._external_recording_active = True
+        # Log externally-controlled start so coupled recording actions are visible in this widget.
+        self._log_bmode_event(
+            "record_start",
+            level="INFO",
+            mode="external",
+            target=session_dir,
+        )
         return session_dir
 
     # Summary:
@@ -1556,6 +1842,13 @@ class BModeWidget(QWidget):
         self._external_recording_active = False
         # Stop the writer thread so file handles flush and close.
         self._image_record_worker.stop(reason)
+        # Log externally-controlled stop so coupled flows remain transparent to users.
+        stop_reason = reason.strip() if reason else "External recording stopped."
+        self._log_bmode_event(
+            "record_stop",
+            level="WARN" if reason else "INFO",
+            reason=stop_reason,
+        )
 
     # Summary:
     # - Record a snapshot of the latest frame using an injected timestamp.
@@ -1596,6 +1889,11 @@ class BModeWidget(QWidget):
             self._start_screen_stream()
         else:
             # Defensive guard: unknown option text should fail safely and guide the user.
+            self._log_bmode_event(
+                "error",
+                level="ERROR",
+                message=f"Unsupported stream option selected: {stream_option}",
+            )
             QMessageBox.warning(
                 self,
                 "Unknown Stream Option",
@@ -1623,6 +1921,12 @@ class BModeWidget(QWidget):
                     calib_path
                 )
             except ValueError as error:
+                # Log calibration parsing failures so users can diagnose camera-start failures.
+                self._log_bmode_event(
+                    "warning",
+                    level="WARN",
+                    message=str(error),
+                )
                 QMessageBox.warning(
                     self,
                     "Calibration Error",
@@ -1630,10 +1934,19 @@ class BModeWidget(QWidget):
                 )
                 return
 
+        # Log the stream request context so source selection is visible in the text stream.
+        self._log_bmode_event(
+            "stream_request",
+            level="INFO",
+            action="start",
+            source="camera",
+            camera_index=int(selected_index),
+            clip_rect=camera_clip_rect,
+        )
         # Start the camera worker; it will emit state changes and frames via the proxy.
         self._camera_worker.start(
             int(selected_index),
-            fps=33,
+            fps=1,
             clip_rect=camera_clip_rect,
         )
 
@@ -1644,6 +1957,12 @@ class BModeWidget(QWidget):
     def _start_screen_stream(self) -> None:
         """Begin streaming a cropped region from the local screen."""
         if not self._screen_rect:
+            # Log missing calibration so screen-mode prerequisites are explicit.
+            self._log_bmode_event(
+                "warning",
+                level="WARN",
+                message="Please load a calibration file before streaming the screen.",
+            )
             QMessageBox.warning(
                 self,
                 "Calibration Required",
@@ -1654,6 +1973,12 @@ class BModeWidget(QWidget):
         screen = self._select_screen_for_stream()
         if screen is None:
             if not QGuiApplication.screens():
+                # Log no-screen errors so missing display state is preserved for troubleshooting.
+                self._log_bmode_event(
+                    "error",
+                    level="ERROR",
+                    message="No screen was detected. Cannot start screen streaming.",
+                )
                 QMessageBox.warning(
                     self,
                     "Screen Error",
@@ -1661,6 +1986,17 @@ class BModeWidget(QWidget):
                 )
             return
 
+        # Log the selected screen and clip details before stream startup.
+        geometry = screen.geometry()
+        self._log_bmode_event(
+            "stream_request",
+            level="INFO",
+            action="start",
+            source="screen",
+            screen_name=screen.name(),
+            screen_size=f"{geometry.width()}x{geometry.height()}",
+            clip_rect=self._screen_rect,
+        )
         # Start the screen worker; it runs on the UI thread via QTimer.
         self._screen_worker.start(screen, self._screen_rect, fps=33)
 
@@ -1754,6 +2090,9 @@ class BModeWidget(QWidget):
     def _on_bmodeStreamProxy_frame_ready(self, packet: FramePacket) -> None:
         # Cache the packet so rendering can happen on the display timer.
         self._latest_frame_packet = packet
+        # Count incoming frames so periodic health logs can report real observed cadence.
+        self._health_window_frame_count += 1
+        self._log_stream_health()
         # Convert the FramePacket fields to the agreed image packet naming.
         image_ts_ms = int(packet.timestamp_ms)
         image_data = packet
@@ -1773,12 +2112,21 @@ class BModeWidget(QWidget):
     # Input: `self`, `is_running` (bool), `message` (str).
     # Returns: `None`.
     def _on_bmodeStreamProxy_state_changed(self, is_running: bool, message: str) -> None:
-        # The UI has no status text field, so we ignore the message for now.
-        _ = message
+        # Log every stream state transition so start/stop reasons stay visible after dialogs close.
+        self._log_bmode_event(
+            "stream_state",
+            level="INFO" if is_running else "WARN",
+            is_running=is_running,
+            reason=message,
+        )
 
         if is_running:
             # Update state so the open button toggles to stop.
             self._is_streaming = True
+            # Reset health counters and timing gates at stream start for a clean session baseline.
+            self._health_window_start_ts = time.monotonic()
+            self._health_window_frame_count = 0
+            self._last_health_log_ts = 0.0
             # UI state change: show stop intent while streaming.
             self.ui.pushButton_bmode_openStream.setText("Stop Stream")
             # UI state change: lock inputs so settings are stable while streaming.
@@ -1815,6 +2163,10 @@ class BModeWidget(QWidget):
         self._latest_frame_packet = None
         self._latest_image_ts_ms = None
         self._latest_image_data = None
+        # Reset health counters and timing gate so idle periods do not affect the next stream window.
+        self._health_window_start_ts = time.monotonic()
+        self._health_window_frame_count = 0
+        self._last_health_log_ts = 0.0
         self.ui.label_bmode_image.clear()
 
     # Summary: Slot function that shows worker errors on the UI thread.
@@ -1822,6 +2174,9 @@ class BModeWidget(QWidget):
     # Input: `self`, `message` (str).
     # Returns: `None`.
     def _on_bmodeStreamProxy_error_message(self, message: str) -> None:
+        # Log stream errors to the text stream so failures remain visible after modal dialogs close.
+        if message:
+            self._log_bmode_event("error", level="ERROR", message=message)
         # Show the warning on the UI thread so it is safe and visible.
         if message:
             QMessageBox.warning(self, "Stream Error", message)
@@ -1833,6 +2188,9 @@ class BModeWidget(QWidget):
     # Input: `self`, `reason` (str).
     # Returns: `None`.
     def _on_bmodeStreamProxy_record_stop(self, reason: str) -> None:
+        # Log record-stop reasons even when recording is already inactive.
+        if reason:
+            self._log_bmode_event("record_stop", level="WARN", reason=reason)
         # Stop recording safely on the UI thread when an error or overload occurs.
         if self._image_record_worker.is_active():
             self._stop_recording(reason)
@@ -1847,6 +2205,8 @@ class BModeWidget(QWidget):
     def _on_bmodeStreamProxy_record_message(self, message: str) -> None:
         # Avoid modal dialogs for transient recording warnings.
         if message:
+            # Log non-fatal recording warnings as extra text feedback for the user.
+            self._log_bmode_event("warning", level="WARN", message=message)
             self.ui.pushButton_bmode_recordStream.setToolTip(message)
 
     # Summary: Slot function that renders the latest cached frame on a timer.
@@ -1944,6 +2304,10 @@ class BModeWidget(QWidget):
         self._latest_frame_packet = None
         self._latest_image_ts_ms = None
         self._latest_image_data = None
+        # Reset health counters and timing gate so stale state does not leak across stream sessions.
+        self._health_window_start_ts = time.monotonic()
+        self._health_window_frame_count = 0
+        self._last_health_log_ts = 0.0
         self.ui.label_bmode_image.clear()
 
     # Summary: Handle the window close event.
@@ -1951,6 +2315,12 @@ class BModeWidget(QWidget):
     # Input: `self`, `event` (the Qt close event object).
     # Returns: `None`.
     def closeEvent(self, event) -> None:
+        # Log window-close cleanup so forced stream/record shutdown has visible feedback.
+        self._log_bmode_event(
+            "info",
+            level="INFO",
+            message="Window closing. Cleaning up stream and recording.",
+        )
         # Stop recording so the writer thread can close cleanly.
         if self._image_record_worker.is_active():
             self._stop_recording("Recording stopped because the window closed.")

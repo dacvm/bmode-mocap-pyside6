@@ -77,6 +77,10 @@ class Ui_Form(object):
 
         self.plainTextEdit_bmode_textStream = QPlainTextEdit(Form)
         self.plainTextEdit_bmode_textStream.setObjectName(u"plainTextEdit_bmode_textStream")
+        font = QFont()
+        font.setFamilies([u"Courier"])
+        font.setPointSize(9)
+        self.plainTextEdit_bmode_textStream.setFont(font)
 
         self.verticalLayout_bmode_menu.addWidget(self.plainTextEdit_bmode_textStream)
 
@@ -119,7 +123,7 @@ class Ui_Form(object):
 
         self.horizontalLayout_bmode.addWidget(self.label_bmode_image)
 
-        self.horizontalLayout_bmode.setStretch(0, 1)
+        self.horizontalLayout_bmode.setStretch(0, 2)
         self.horizontalLayout_bmode.setStretch(1, 3)
 
         self.horizontalLayout_3.addLayout(self.horizontalLayout_bmode)

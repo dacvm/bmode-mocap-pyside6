@@ -56,8 +56,8 @@ class Ui_Form(object):
         self.plainTextEdit_mocap_textStream.setObjectName(u"plainTextEdit_mocap_textStream")
         self.plainTextEdit_mocap_textStream.setEnabled(True)
         font = QFont()
-        font.setFamilies([u"Courier New"])
-        font.setPointSize(7)
+        font.setFamilies([u"Courier"])
+        font.setPointSize(9)
         self.plainTextEdit_mocap_textStream.setFont(font)
 
         self.verticalLayout_mocap_menu.addWidget(self.plainTextEdit_mocap_textStream)
@@ -98,6 +98,7 @@ class Ui_Form(object):
         self.widget_mocap_matplotlib.setObjectName(u"widget_mocap_matplotlib")
         self.verticalLayout_2 = QVBoxLayout(self.widget_mocap_matplotlib)
         self.verticalLayout_2.setObjectName(u"verticalLayout_2")
+        self.verticalLayout_2.setContentsMargins(0, 0, 0, 0)
         self.verticalLayout_mocap_matplotlib = QVBoxLayout()
         self.verticalLayout_mocap_matplotlib.setObjectName(u"verticalLayout_mocap_matplotlib")
 
@@ -106,7 +107,7 @@ class Ui_Form(object):
 
         self.horizontalLayout_mocap.addWidget(self.widget_mocap_matplotlib)
 
-        self.horizontalLayout_mocap.setStretch(0, 1)
+        self.horizontalLayout_mocap.setStretch(0, 2)
         self.horizontalLayout_mocap.setStretch(1, 3)
 
         self.horizontalLayout_2.addLayout(self.horizontalLayout_mocap)
