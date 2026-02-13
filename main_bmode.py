@@ -1120,7 +1120,7 @@ class BModeWidget(QWidget):
         self._health_window_frame_count = 0
         # Track health-log cadence separately so rate-limiting follows the same pattern as mocap.
         self._last_health_log_ts = 0.0
-        self._health_log_interval_sec = 2.0
+        self._health_log_interval_sec = 1.0
 
         # Timer to throttle rendering so the UI thread stays responsive.
         self._display_timer = QTimer(self)
@@ -1268,15 +1268,6 @@ class BModeWidget(QWidget):
         elif event_key in {"warning", "error"}:
             message_text = str(context.get("message", "")).strip()
 
-        # Build periodic health snapshots so users can see if stream cadence is stable.
-        elif event_key == "health":
-            fps_estimate = float(context.get("fps_estimate", 0.0))
-            recording_active = bool(context.get("recording_active", False))
-            recording_text = "on" if recording_active else "off"
-            message_text = (
-                f"FPS~{fps_estimate:.1f}, recording={recording_text}."
-            )
-
         # Fallback formatting: include event name and structured key/value fields.
         else:
             detail_parts = [f"{key}={context[key]}" for key in sorted(context.keys())]
@@ -1328,9 +1319,8 @@ class BModeWidget(QWidget):
         recording_text = "on" if self._image_record_worker.is_active() else "off"
         health_line = (
             "Stream OK | "
-            f"Frames={frame_count} | "
             f"FPS~{fps_estimate:.1f} | "
-            f"Recording={recording_text}"
+            f"REC={recording_text}"
         )
         self._append_bmode_textstream("INFO", health_line)
 
@@ -1916,7 +1906,7 @@ class BModeWidget(QWidget):
         # Start the camera worker; it will emit state changes and frames via the proxy.
         self._camera_worker.start(
             int(selected_index),
-            fps=33,
+            fps=1,
             clip_rect=camera_clip_rect,
         )
 
