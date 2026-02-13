@@ -1199,11 +1199,44 @@ class MocapWidget(QWidget):
         super().__init__()
         self.ui = Ui_Mocap()
         self.ui.setupUi(self)
+        # UI state change: force stylesheet background/border painting on this QWidget container.
+        # WHY: some QWidget styles render inconsistently without WA_StyledBackground enabled.
+        self.ui.widget_mocap_matplotlib.setAttribute(Qt.WA_StyledBackground, True)
         # Set a stable objectName so slot naming can follow project conventions.
         self.setObjectName("mocapWidget")
         # Cache the original mocap plot-container stylesheet so recording indicator changes are reversible.
         self._mocap_matplotlib_base_stylesheet = (
             self.ui.widget_mocap_matplotlib.styleSheet()
+        )
+        # Keep a fixed border thickness for the recording indicator to avoid magic numbers in style updates.
+        self._mocap_recording_indicator_border_px = 6
+        # Cache the original layout margins so we can preserve any future Designer-configured spacing.
+        base_margins = self.ui.verticalLayout_2.contentsMargins()
+        self._mocap_matplotlib_base_margins = (
+            base_margins.left(),
+            base_margins.top(),
+            base_margins.right(),
+            base_margins.bottom(),
+        )
+        # UI state change: always reserve enough inset so the red border is never covered by child widgets.
+        # WHY: toolbar/canvas fill this layout; without inset, they visually occlude container borders.
+        self.ui.verticalLayout_2.setContentsMargins(
+            max(
+                self._mocap_matplotlib_base_margins[0],
+                self._mocap_recording_indicator_border_px,
+            ),
+            max(
+                self._mocap_matplotlib_base_margins[1],
+                self._mocap_recording_indicator_border_px,
+            ),
+            max(
+                self._mocap_matplotlib_base_margins[2],
+                self._mocap_recording_indicator_border_px,
+            ),
+            max(
+                self._mocap_matplotlib_base_margins[3],
+                self._mocap_recording_indicator_border_px,
+            ),
         )
 
         # Keep the text area readable but non-editable for incoming stream data.
@@ -1996,18 +2029,23 @@ class MocapWidget(QWidget):
         # Use the cached base style so we can always restore exactly what existed before recording.
         base_stylesheet = self._mocap_matplotlib_base_stylesheet.strip()
         if active:
-            # Scope the border rule to the container objectName so child widgets do not inherit it.
-            scoped_indicator_rule = (
-                "#widget_mocap_matplotlib { border: 6px solid rgb(255, 0, 0); }"
-                "#widget_mocap_matplotlib * { border: 0px; }"
+            # Scope the border rule to the container objectName so only this widget draws the indicator.
+            selector = "#widget_mocap_matplotlib"
+            border_rule = (
+                f"{selector} "
+                f"{{ border: {self._mocap_recording_indicator_border_px}px solid rgb(255, 0, 0); }}"
             )
-            # Preserve any existing base declarations by appending the scoped indicator rules.
-            if base_stylesheet:
+            # Keep Qt syntax valid for both selector-based and property-only cached styles.
+            if "{" in base_stylesheet and "}" in base_stylesheet:
+                indicator_stylesheet = f"{base_stylesheet}\n{border_rule}"
+            elif base_stylesheet:
+                normalized_base = base_stylesheet.rstrip(";")
                 indicator_stylesheet = (
-                    f"{base_stylesheet.rstrip(';')}; {scoped_indicator_rule}"
+                    f"{selector} {{ {normalized_base}; "
+                    f"border: {self._mocap_recording_indicator_border_px}px solid rgb(255, 0, 0); }}"
                 )
             else:
-                indicator_stylesheet = scoped_indicator_rule
+                indicator_stylesheet = border_rule
             self.ui.widget_mocap_matplotlib.setStyleSheet(indicator_stylesheet)
             return
 
