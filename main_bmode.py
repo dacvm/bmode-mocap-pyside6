@@ -1177,8 +1177,10 @@ class BModeWidget(QWidget):
             self._on_pushButton_bmode_recordStream_clicked
         )
         # Initial feedback: make the first state explicit so users know how to begin.
-        self._append_bmode_textstream(
-            "INFO", "Idle. Select stream source and press Open Stream."
+        self._log_bmode_event(
+            "info",
+            level="INFO",
+            message="Idle. Select stream source and press Open Stream.",
         )
 
     # Summary: Append a single formatted line to the B-mode text stream.
@@ -1206,6 +1208,12 @@ class BModeWidget(QWidget):
             cursor.removeSelectedText()
             # Remove the leftover newline after deleting the first block.
             cursor.deleteChar()
+
+        # Keep the latest line visible after append/trim so the console behaves like a live activity feed.
+        cursor = self.ui.plainTextEdit_bmode_textStream.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.ui.plainTextEdit_bmode_textStream.setTextCursor(cursor)
+        self.ui.plainTextEdit_bmode_textStream.ensureCursorVisible()
 
     # Summary: Build and log a generic B-mode event message for the text stream.
     # What it does: Converts structured event context into one human-readable line and applies duplicate debouncing.
@@ -1250,9 +1258,11 @@ class BModeWidget(QWidget):
         # Build recording start messages with destination and mode details.
         elif event_key == "record_start":
             mode_text = str(context.get("mode", "local")).strip() or "local"
-            session_dir = str(context.get("session_dir", "")).strip()
-            if session_dir:
-                message_text = f"Recording started ({mode_text}) -> {session_dir}."
+            target_text = str(context.get("target", "")).strip()
+            if not target_text:
+                target_text = str(context.get("session_dir", "")).strip()
+            if target_text:
+                message_text = f"Recording started ({mode_text}) -> {target_text}."
             else:
                 message_text = f"Recording started ({mode_text})."
 
@@ -1264,15 +1274,23 @@ class BModeWidget(QWidget):
             else:
                 message_text = "Recording stopped."
 
-        # Build generic warning/error messages from worker or validation paths.
-        elif event_key in {"warning", "error"}:
+        # Build compact health snapshots from stream-health logic.
+        elif event_key == "stream_health":
+            message_text = str(context.get("message", "")).strip()
+
+        # Build generic informational and warning/error messages.
+        elif event_key in {"warning", "error", "info"}:
             message_text = str(context.get("message", "")).strip()
 
         # Fallback formatting: include event name and structured key/value fields.
         else:
             detail_parts = [f"{key}={context[key]}" for key in sorted(context.keys())]
-            details_text = f" ({', '.join(detail_parts)})" if detail_parts else ""
+            details_text = f"({', '.join(detail_parts)})" if detail_parts else ""
             message_text = f"Event {event_key}{details_text}"
+
+        # Skip blank messages so malformed event context does not create empty rows.
+        if not message_text:
+            return
 
         # Debounce identical consecutive messages so repeated worker callbacks do not flood the UI.
         now_ts = time.monotonic()
@@ -1322,7 +1340,7 @@ class BModeWidget(QWidget):
             f"FPS~{fps_estimate:.1f} | "
             f"REC={recording_text}"
         )
-        self._append_bmode_textstream("INFO", health_line)
+        self._log_bmode_event("stream_health", level="INFO", message=health_line)
 
     # Summary: Scan for available cameras and show them in the dropdown.
     # What it does: Tries a small set of camera indices and adds the ones that open successfully.
@@ -1684,7 +1702,7 @@ class BModeWidget(QWidget):
             "record_start",
             level="INFO",
             mode="local",
-            session_dir=session_dir,
+            target=session_dir,
         )
 
     # Summary: Stop the active JPEG recording session and release writer resources.
@@ -1788,7 +1806,7 @@ class BModeWidget(QWidget):
             "record_start",
             level="INFO",
             mode="external",
-            session_dir=session_dir,
+            target=session_dir,
         )
         return session_dir
 
@@ -2277,8 +2295,8 @@ class BModeWidget(QWidget):
     def closeEvent(self, event) -> None:
         # Log window-close cleanup so forced stream/record shutdown has visible feedback.
         self._log_bmode_event(
-            "warning",
-            level="WARN",
+            "info",
+            level="INFO",
             message="Window closing. Cleaning up stream and recording.",
         )
         # Stop recording so the writer thread can close cleanly.

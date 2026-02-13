@@ -1304,7 +1304,11 @@ class MocapWidget(QWidget):
         # Disable recording until streaming is active.
         self.ui.pushButton_mocap_record.setEnabled(False)
         # Initial feedback: make the first state explicit so users know how to begin.
-        self._log_mocap_event("Idle. Enter QTM IP and press Open Stream.", level="INFO")
+        self._log_mocap_event(
+            "info",
+            level="INFO",
+            message="Idle. Enter QTM IP and press Open Stream.",
+        )
 
     # Summary:
     # - Slot function that handles the open/close stream button click.
@@ -1315,6 +1319,13 @@ class MocapWidget(QWidget):
         if self._stream_state == "idle":
             self._start_stream()
         else:
+            # Log stop intent so request and resulting state transitions are both visible.
+            self._log_mocap_event(
+                "stream_request",
+                level="INFO",
+                action="stop",
+                source="qtm",
+            )
             self._stop_stream()
 
     # Summary:
@@ -1430,8 +1441,11 @@ class MocapWidget(QWidget):
         self.ui.pushButton_mocap_openStream.setText("Stop Stream")
         # Log the connection attempt so users can see explicit stream lifecycle intent.
         self._log_mocap_event(
-            f"Connecting to {ip_address}:{QTM_PORT}...",
+            "stream_request",
             level="INFO",
+            action="start",
+            source="qtm",
+            endpoint=f"{ip_address}:{QTM_PORT}",
         )
 
         # Clear the plot and cache so stale points are not shown during a new connect.
@@ -1454,29 +1468,20 @@ class MocapWidget(QWidget):
         self._stream_worker.stop()
 
     # Summary:
-    # - Append one debounced line to the mocap log console.
-    # - What it does: Adds a timestamp, enforces bounded log size, and keeps the view scrolled to the latest line.
-    # - Input: `self`, `line` (str).
+    # - Append one formatted line to the mocap log console.
+    # - What it does: Adds timestamp and level labels, enforces bounded log size, and keeps the view scrolled to the latest line.
+    # - Input: `self`, `level` (str), `message` (str).
     # - Returns: None.
-    def _append_mocap_textstream(self, line: str) -> None:
-        # Normalize and ignore empty lines so the console only contains useful entries.
-        line_text = str(line).strip()
-        if not line_text:
+    def _append_mocap_textstream(self, level: str, message: str) -> None:
+        # Normalize and ignore empty messages so the console only contains useful entries.
+        message_text = str(message).strip()
+        if not message_text:
             return
 
-        # Debounce repeated identical lines so rapid worker callbacks do not spam the console.
-        now_ts = time.monotonic()
-        if (
-            line_text == self._last_textstream_line
-            and (now_ts - self._last_textstream_line_ts) < 1.0
-        ):
-            return
-        self._last_textstream_line = line_text
-        self._last_textstream_line_ts = now_ts
-
-        # Prefix with local wall-clock time so users can correlate events across widgets.
-        timestamp_text = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        formatted_line = f"[{timestamp_text}] {line_text}"
+        # Prefix with local wall-clock time and level so both widgets use the same visible structure.
+        timestamp_text = datetime.now().strftime("%H:%M:%S")
+        level_text = (level or "INFO").upper()
+        formatted_line = f"[{timestamp_text}] [{level_text}] {message_text}"
         self.ui.plainTextEdit_mocap_textStream.appendPlainText(formatted_line)
 
         # Trim old lines from the top so long sessions keep memory usage stable.
@@ -1496,17 +1501,80 @@ class MocapWidget(QWidget):
         self.ui.plainTextEdit_mocap_textStream.ensureCursorVisible()
 
     # Summary:
-    # - Log one mocap lifecycle event with a normalized level label.
-    # - What it does: Formats one human-readable line and sends it through the bounded text-stream helper.
-    # - Input: `self`, `message` (str), `level` (str).
+    # - Log one mocap lifecycle event with canonical event-based formatting.
+    # - What it does: Converts event/context data into one human-readable line, debounces duplicates, and appends to the bounded text stream.
+    # - Input: `self`, `event` (str), `level` (str), `context` (keyword context fields).
     # - Returns: None.
-    def _log_mocap_event(self, message: str, *, level: str = "INFO") -> None:
-        # Normalize message/level so every entry has a consistent and readable structure.
-        message_text = str(message).strip()
+    def _log_mocap_event(self, event: str, *, level: str = "INFO", **context) -> None:
+        # Normalize the event key so callers can pass stable, case-insensitive identifiers.
+        event_key = str(event).strip().lower()
+        message_text = ""
+
+        # Build stream-start/stop request messages with source-specific context.
+        if event_key == "stream_request":
+            action = str(context.get("action", "start")).strip().lower() or "start"
+            source = str(context.get("source", "unknown")).strip().lower() or "unknown"
+            detail_parts: list[str] = []
+            endpoint_text = str(context.get("endpoint", "")).strip()
+            if endpoint_text:
+                detail_parts.append(f"endpoint={endpoint_text}")
+            details_text = f" ({', '.join(detail_parts)})" if detail_parts else ""
+            message_text = f"Stream {action} requested: {source}{details_text}."
+
+        # Build stream running-state messages from worker signals.
+        elif event_key == "stream_state":
+            state_text = "started" if bool(context.get("is_running", False)) else "stopped"
+            reason_text = str(context.get("reason", "")).strip()
+            if reason_text:
+                message_text = f"Stream {state_text}: {reason_text}."
+            else:
+                message_text = f"Stream {state_text}."
+
+        # Build recording start messages with destination and mode details.
+        elif event_key == "record_start":
+            mode_text = str(context.get("mode", "local")).strip() or "local"
+            target_text = str(context.get("target", "")).strip()
+            if target_text:
+                message_text = f"Recording started ({mode_text}) -> {target_text}."
+            else:
+                message_text = f"Recording started ({mode_text})."
+
+        # Build recording stop messages with a clear reason when available.
+        elif event_key == "record_stop":
+            reason_text = str(context.get("reason", "")).strip()
+            if reason_text:
+                message_text = f"Recording stopped: {reason_text}"
+            else:
+                message_text = "Recording stopped."
+
+        # Build compact health snapshots from stream-health logic.
+        elif event_key == "stream_health":
+            message_text = str(context.get("message", "")).strip()
+
+        # Build generic informational and warning/error messages.
+        elif event_key in {"warning", "error", "info"}:
+            message_text = str(context.get("message", "")).strip()
+
+        # Fallback formatting: include event name and structured key/value fields.
+        else:
+            detail_parts = [f"{key}={context[key]}" for key in sorted(context.keys())]
+            details_text = f"({', '.join(detail_parts)})" if detail_parts else ""
+            message_text = f"Event {event_key}{details_text}"
+
+        # Skip blank messages so malformed event context does not spam empty rows.
         if not message_text:
             return
-        level_text = (level or "INFO").upper()
-        self._append_mocap_textstream(f"[{level_text}] {message_text}")
+
+        # Debounce identical consecutive messages so repeated callbacks do not flood the UI.
+        now_ts = time.monotonic()
+        line_key = f"{(level or 'INFO').upper()}::{message_text}"
+        if line_key == self._last_textstream_line and (
+            now_ts - self._last_textstream_line_ts
+        ) < 1.0:
+            return
+        self._last_textstream_line = line_key
+        self._last_textstream_line_ts = now_ts
+        self._append_mocap_textstream(level, message_text)
 
     # Summary:
     # - Log periodic stream-health snapshots at a fixed cadence.
@@ -1536,7 +1604,7 @@ class MocapWidget(QWidget):
         if not self._latest_health_has_6d_data:
             health_line += " (no 6D this frame)"
         health_line += f" | FPS~{self._latest_health_fps_estimate:.1f}"
-        self._append_mocap_textstream(health_line)
+        self._log_mocap_event("stream_health", level="INFO", message=health_line)
 
     # Summary:
     # - Slot function that updates the activity log from proxy text messages.
@@ -1544,7 +1612,7 @@ class MocapWidget(QWidget):
     # - Returns: None.
     def _on_mocapStreamProxy_text_ready(self, text: str) -> None:
         # Slot function: route proxy text to the bounded log console on the UI thread.
-        self._log_mocap_event(text, level="INFO")
+        self._log_mocap_event("info", level="INFO", message=text)
 
     # Summary:
     # - Slot function that reacts to stream state changes and updates UI controls accordingly.
@@ -1552,11 +1620,12 @@ class MocapWidget(QWidget):
     # - Returns: None.
     def _on_mocapStreamProxy_state_changed(self, is_running: bool, message: str) -> None:
         # Slot function: keep stream lifecycle messages visible in the bounded activity log.
-        if message:
-            self._log_mocap_event(
-                message,
-                level="INFO" if is_running else "WARN",
-            )
+        self._log_mocap_event(
+            "stream_state",
+            level="INFO" if is_running else "WARN",
+            is_running=is_running,
+            reason=message,
+        )
 
         if is_running:
             # Mark the UI as streaming so users know the connection is live.
@@ -1617,7 +1686,7 @@ class MocapWidget(QWidget):
     def _on_mocapStreamProxy_record_message(self, message: str) -> None:
         # Slot function: keep non-fatal recording warnings visible in the same bounded activity log.
         if message:
-            self._log_mocap_event(f"RECORD: {message}", level="WARN")
+            self._log_mocap_event("warning", level="WARN", message=message)
 
     # Summary:
     # - Slot function that stops recording when background threads request it.
@@ -1626,7 +1695,7 @@ class MocapWidget(QWidget):
     def _on_mocapStreamProxy_record_stop(self, reason: str) -> None:
         # Slot function: surface record-stop reasons in the activity log before changing worker/UI state.
         if reason:
-            self._log_mocap_event(f"RECORD: {reason}", level="WARN")
+            self._log_mocap_event("record_stop", level="WARN", reason=reason)
         # Stop recording safely on the UI thread when an error or overload occurs.
         if self._record_worker.is_active():
             # Skip duplicate reason logging because this slot already logged the stop cause.
@@ -1884,8 +1953,10 @@ class MocapWidget(QWidget):
         self._set_mocap_recording_indicator(active=True)
         # Log recording start so the destination path remains visible in the activity log.
         self._log_mocap_event(
-            f"RECORD: Recording to {record_file_path}",
+            "record_start",
             level="INFO",
+            mode="local",
+            target=record_file_path,
         )
 
     # Summary:
@@ -1913,7 +1984,7 @@ class MocapWidget(QWidget):
 
         # Log the stop reason so recording lifecycle events remain visible after UI state changes.
         if reason and log_reason:
-            self._log_mocap_event(f"RECORD: {reason}", level="INFO")
+            self._log_mocap_event("record_stop", level="INFO", reason=reason)
 
     # Summary:
     # - Update the mocap plot-container border to indicate whether recording is active.
