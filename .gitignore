@@ -2,3 +2,7 @@
 .pycache_tmp/
 seqs/
 __pycache__/
+*.pyc
+*.pyo
+*.pyc.*
+*.pyo.*
