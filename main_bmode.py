@@ -1088,8 +1088,20 @@ class BModeWidget(QWidget):
         self.ui.plainTextEdit_bmode_textStream.setReadOnly(True)
         # UI state change: disable undo history because logs are append-only and should stay lightweight.
         self.ui.plainTextEdit_bmode_textStream.setUndoRedoEnabled(False)
+        # UI state change: force stylesheet background/border painting on this QLabel container.
+        # WHY: some QWidget/QLabel styles render inconsistently without WA_StyledBackground enabled.
+        self.ui.label_bmode_image.setAttribute(Qt.WA_StyledBackground, True)
         # Cache the original image-label stylesheet so recording indicator changes keep the base background color.
         self._bmode_image_label_base_stylesheet = self.ui.label_bmode_image.styleSheet()
+        # Keep a fixed border thickness for the recording indicator to avoid magic numbers in style updates.
+        self._bmode_recording_indicator_border_px = 6
+        # UI state change: reserve border space from startup with a transparent border.
+        # WHY: this prevents layout/size-hint growth when recording turns the border red.
+        self.ui.label_bmode_image.setStyleSheet(
+            self._build_bmode_recording_indicator_stylesheet(
+                border_color="rgba(255, 0, 0, 0)"
+            )
+        )
 
         # Cache the calibration-derived screen rectangle used for screen streaming.
         self._screen_rect: Optional[tuple[int, int, int, int]] = None
@@ -1728,7 +1740,7 @@ class BModeWidget(QWidget):
         # UI state change: restore the record button text.
         self.ui.pushButton_bmode_recordStream.setText("Record")
 
-        # UI state change: remove the recording indicator and restore the original label style.
+        # UI state change: hide the recording indicator while keeping reserved border space.
         self._set_bmode_recording_indicator(active=False)
 
         # Log recording-stop feedback so users can see user stops and forced stops in one place.
@@ -1743,42 +1755,52 @@ class BModeWidget(QWidget):
         if reason:
             QMessageBox.warning(self, "Recording Stopped", reason)
 
+    # Summary:
+    # - Build the scoped stylesheet used by the B-mode recording indicator.
+    # - What it does: Preserves the original label style and appends a fixed-width border
+    #   whose color can be toggled between red (active) and transparent (idle).
+    # - Input: `self`, `border_color` (str).
+    # - Returns: Complete stylesheet string (str).
+    def _build_bmode_recording_indicator_stylesheet(self, border_color: str) -> str:
+        # Use the cached base style so the UI-defined background color remains unchanged.
+        base_stylesheet = self._bmode_image_label_base_stylesheet.strip()
+        selector = "#label_bmode_image"
+        # Keep border width fixed to reserve layout space in both idle and recording states.
+        border_rule = (
+            f"border: {self._bmode_recording_indicator_border_px}px solid {border_color};"
+        )
+        # Support selector-based base styles by appending a scoped override rule.
+        if "{" in base_stylesheet and "}" in base_stylesheet:
+            return f"{base_stylesheet}\n{selector} {{ {border_rule} }}"
+        # Support property-only base styles by wrapping them in the label selector.
+        if base_stylesheet:
+            normalized_base = base_stylesheet.rstrip(";")
+            return f"{selector} {{ {normalized_base}; {border_rule} }}"
+        # Fall back to border-only style when no base declarations exist.
+        return f"{selector} {{ {border_rule} }}"
+
     # Summary: Update the image-label border to indicate whether recording is active.
-    # What it does: Keeps the label's original stylesheet (including background color) and conditionally
-    # adds/removes a thick red border for recording status feedback.
+    # What it does: Keeps a fixed border width at all times, then toggles only border color
+    # between red (active) and transparent (idle) for stable layout geometry.
     # Input: `self`, `active` (bool).
     # Returns: `None`.
     def _set_bmode_recording_indicator(self, active: bool) -> None:
-        # Use the cached base style so we never overwrite the .ui-defined background color.
-        base_stylesheet = self._bmode_image_label_base_stylesheet.strip()
+        # Switch border color only, while keeping width fixed to avoid geometry jumps on toggle.
         if active:
-            # Keep Qt syntax valid by producing selector-based rules when we add scoped selectors.
-            selector = "#label_bmode_image"
-            child_reset_rule = f"{selector} * {{ border: 0px; }}"
-            if "{" in base_stylesheet and "}" in base_stylesheet:
-                # If the base style already contains full selector rules, append the border rule directly.
-                indicator_stylesheet = (
-                    f"{base_stylesheet}\n"
-                    f"{selector} {{ border: 6px solid rgb(255, 0, 0); }}\n"
-                    f"{child_reset_rule}"
+            # UI state change: make the reserved border visible during active recording.
+            self.ui.label_bmode_image.setStyleSheet(
+                self._build_bmode_recording_indicator_stylesheet(
+                    border_color="rgb(255, 0, 0)"
                 )
-            elif base_stylesheet:
-                # Convert property-only declarations into a selector block before adding the border.
-                normalized_base = base_stylesheet.rstrip(";")
-                indicator_stylesheet = (
-                    f"{selector} {{ {normalized_base}; border: 6px solid rgb(255, 0, 0); }}\n"
-                    f"{child_reset_rule}"
-                )
-            else:
-                indicator_stylesheet = (
-                    f"{selector} {{ border: 6px solid rgb(255, 0, 0); }}\n"
-                    f"{child_reset_rule}"
-                )
-            self.ui.label_bmode_image.setStyleSheet(indicator_stylesheet)
+            )
             return
 
-        # Restore the exact original style when recording is not active.
-        self.ui.label_bmode_image.setStyleSheet(base_stylesheet)
+        # UI state change: keep reserved space but hide the border when recording is not active.
+        self.ui.label_bmode_image.setStyleSheet(
+            self._build_bmode_recording_indicator_stylesheet(
+                border_color="rgba(255, 0, 0, 0)"
+            )
+        )
 
     # Summary:
     # - Set the B-mode recording indicator from an external controller.
