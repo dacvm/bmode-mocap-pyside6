@@ -2,6 +2,7 @@
 """Live-preview widget that streams from the selected USB camera into the Qt UI."""
 
 # Standard library helpers for launching a Qt application and accepting CLI args.
+import logging
 import os
 import queue
 import sys
@@ -33,6 +34,15 @@ IMAGE_RECORD_QUEUE_MAXSIZE = 300
 JPEG_QUALITY = 85
 IMAGE_RECORD_DROP_WINDOW_SECONDS = 2.0
 IMAGE_RECORD_DROP_RATE_THRESHOLD = 0.05
+CAMERA_STOP_JOIN_TIMEOUT_SEC = 0.5
+CAMERA_STOP_RETRY_JOIN_TIMEOUT_SEC = 0.5
+CAMERA_REOPEN_COOLDOWN_SEC = 0.15
+CAMERA_STARTUP_MAX_RETRIES = 2
+CAMERA_STARTUP_RETRY_DELAY_SEC = 0.20
+CAMERA_STARTUP_WARMUP_TIMEOUT_SEC = 0.80
+CAMERA_STARTUP_MAX_WARMUP_FRAMES = 24
+
+logger = logging.getLogger(__name__)
 
 
 # Summary:
@@ -97,6 +107,15 @@ class CameraStreamWorker:
         self._cap: Optional[cv2.VideoCapture] = None
         self._active = False
 
+        # Track a monotonic session id so stale threads can never update the current stream state.
+        # Some camera drivers can keep old reads "alive" briefly, and their late signals can otherwise
+        # flip the UI back to idle/blank even though a new stream already started.
+        self._session_id = 0
+
+        # Track the last stop time so reopen attempts can wait briefly for USB drivers to settle.
+        # Many USB frame grabbers behave better if we wait a short moment before reopening.
+        self._last_stop_ts = 0.0
+
     # Summary:
     # - Start the camera acquisition thread.
     # - Input: `self`, `camera_index` (int), `fps` (int; used as ms interval),
@@ -114,13 +133,25 @@ class CameraStreamWorker:
                 return
             self._active = True
 
+            # Create a unique session marker so we can ignore late events from older threads.
+            # We increment it here (inside the lock) so the worker thread always knows which session
+            # it belongs to, and so stop() can invalidate the session immediately.
+            self._session_id += 1
+            session_id = self._session_id
+
             # Create a fresh stop event for this streaming session.
             self._stop_event = threading.Event()
 
             # Start the background thread so camera I/O never blocks the UI thread.
             self._thread = threading.Thread(
                 target=self._run,
-                args=(int(camera_index), int(fps), self._stop_event, clip_rect),
+                args=(
+                    int(session_id),
+                    int(camera_index),
+                    int(fps),
+                    self._stop_event,
+                    clip_rect,
+                ),
                 daemon=True,
             )
             # Thread start: kick off the worker loop.
@@ -133,9 +164,13 @@ class CameraStreamWorker:
     def stop(self) -> None:
         # Lock to avoid racing against start.
         with self._lock:
-            if not self._active:
+            if not self._active and self._thread is None:
                 return
             self._active = False
+            
+            # Invalidate the current session so stale thread callbacks are ignored immediately.
+            # This protects the UI state from older threads that might still be emitting signals.
+            self._session_id += 1
 
             stop_event = self._stop_event
             worker_thread = self._thread
@@ -143,6 +178,8 @@ class CameraStreamWorker:
             # Clear references so a new start can rebuild cleanly.
             self._stop_event = None
             self._thread = None
+            # Track stop time so the next open can respect a short cooldown.
+            self._last_stop_ts = time.monotonic()
 
         # Signal the worker loop to exit.
         if stop_event is not None:
@@ -150,7 +187,25 @@ class CameraStreamWorker:
 
         # Join briefly so stop does not freeze the UI.
         if worker_thread is not None:
-            worker_thread.join(timeout=0.5)
+            worker_thread.join(timeout=CAMERA_STOP_JOIN_TIMEOUT_SEC)
+
+            # Some camera drivers block inside read(); force-release can help the loop unwind.
+            # If the thread is still alive after a short join, we try releasing the capture handle.
+            # This can "unstick" read() so the worker thread can exit promptly.
+            if worker_thread.is_alive():
+                cap = self._cap
+                if cap is not None:
+                    try:
+                        cap.release()
+                        logger.debug(
+                            "Forced VideoCapture release during stop to unblock camera thread."
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Forced VideoCapture release failed during stop.",
+                            exc_info=True,
+                        )
+                worker_thread.join(timeout=CAMERA_STOP_RETRY_JOIN_TIMEOUT_SEC)
 
     # Summary:
     # - Emit a proxy signal safely when the UI may have already been destroyed.
@@ -165,117 +220,398 @@ class CameraStreamWorker:
             return
 
     # Summary:
+    # - Check whether a worker callback still belongs to the active camera stream session.
+    # - Input: `self`, `session_id` (int) for the worker thread emitting events.
+    # - Returns: `True` when the session is still current, otherwise `False`.
+    def _is_current_session(self, session_id: int) -> bool:
+        # Read under lock so session checks stay consistent with start/stop updates.
+        with self._lock:
+            return session_id == self._session_id
+
+    # Summary:
+    # - Emit proxy signals only when the worker still owns the active stream session.
+    # - Input: `self`, `session_id` (int), `emit_fn` (callable), `args` (tuple[object, ...]).
+    # - Returns: None.
+    def _emit_for_session(self, session_id: int, emit_fn, *args) -> None:
+        # Suppress stale thread callbacks that can otherwise flip UI state after a new stream starts.
+        if not self._is_current_session(session_id):
+            # This log is intentionally debug-level so normal runs stay quiet.
+            # If you need to debug a rare camera issue, enable debug logging to see these events.
+            logger.debug(
+                "Suppressed stale camera event from session %s.",
+                session_id,
+            )
+            return
+        self._safe_emit(emit_fn, *args)
+
+    # Summary:
+    # - Convert an OpenCV backend constant into a short human-readable debug label.
+    # - Input: `self`, `backend` (int) backend id used for VideoCapture.
+    # - Returns: Backend label (str).
+    def _backend_name(self, backend: int) -> str:
+        # Keep labels explicit so startup logs are easy to compare across attempts.
+        if backend == getattr(cv2, "CAP_DSHOW", -1):
+            return "DSHOW"
+        if backend == getattr(cv2, "CAP_MSMF", -1):
+            return "MSMF"
+        if backend == getattr(cv2, "CAP_ANY", -1):
+            return "ANY"
+        return str(int(backend))
+
+    # Summary:
+    # - Build the backend order for startup retries using the selected fallback strategy.
+    # - Input: `self`.
+    # - Returns: Ordered list of backend ids (list[int]) for each startup attempt.
+    def _build_backend_attempt_sequence(self) -> list[int]:
+        # Preferred strategy: DSHOW -> MSMF -> DSHOW.
+        # DirectShow works well for many USB cameras, but some frame grabbers initialize more reliably
+        # using Media Foundation. We try a deterministic sequence so behavior is reproducible.
+        dshow = getattr(cv2, "CAP_DSHOW", None)
+        msmf = getattr(cv2, "CAP_MSMF", None)
+        attempt_order: list[int] = []
+        if dshow is not None:
+            attempt_order.append(int(dshow))
+        if msmf is not None:
+            attempt_order.append(int(msmf))
+        if dshow is not None:
+            attempt_order.append(int(dshow))
+
+        # Fallback to CAP_ANY when backend constants are unavailable in this OpenCV build.
+        if not attempt_order:
+            attempt_order = [int(getattr(cv2, "CAP_ANY", 0))]
+
+        # Keep total attempts aligned with retry policy (first try + configured retries).
+        max_attempts = CAMERA_STARTUP_MAX_RETRIES + 1
+        if len(attempt_order) < max_attempts:
+            attempt_order.extend([attempt_order[-1]] * (max_attempts - len(attempt_order)))
+        return attempt_order[:max_attempts]
+
+    # Summary:
+    # - Sleep in short slices so stop requests can interrupt waits quickly.
+    # - Input: `self`, `stop_event` (threading.Event), `seconds` (float).
+    # - Returns: `True` if stop was requested during sleep, otherwise `False`.
+    def _sleep_with_stop(self, stop_event: threading.Event, seconds: float) -> bool:
+        # Long blocking sleeps can delay shutdown and worsen rapid camera switching behavior.
+        # We sleep in tiny slices so stop() can interrupt quickly and the UI "Stop Stream" feels immediate.
+        end_time = time.monotonic() + max(float(seconds), 0.0)
+        while time.monotonic() < end_time:
+            if stop_event.is_set():
+                return True
+            remaining = end_time - time.monotonic()
+            time.sleep(min(0.01, max(remaining, 0.0)))
+        return stop_event.is_set()
+
+    # Summary:
+    # - Respect a short cooldown after stop before reopening the camera device.
+    # - Input: `self`, `stop_event` (threading.Event).
+    # - Returns: `True` when cooldown completed, `False` when stop interrupted startup.
+    def _wait_for_start_cooldown(self, stop_event: threading.Event) -> bool:
+        # Read cooldown timing atomically so start uses the latest stop timestamp.
+        with self._lock:
+            elapsed = time.monotonic() - self._last_stop_ts
+        remaining = CAMERA_REOPEN_COOLDOWN_SEC - elapsed
+        if remaining <= 0:
+            return True
+        # The short cooldown reduces the chance that the device starts in a bad state.
+        # This is especially helpful for USB frame grabbers that sometimes return blank frames right after open.
+        logger.debug("Waiting %.3fs camera reopen cooldown.", remaining)
+        return not self._sleep_with_stop(stop_event, remaining)
+
+    # Summary:
+    # - Open a camera and validate startup by requiring at least one non-empty, non-black frame.
+    # - Input: `self`, `camera_index` (int), `backend` (int).
+    # - Returns: `(capture, first_frame, reason)` where capture/frame are None on failure.
+    def _open_validated_capture(
+        self,
+        camera_index: int,
+        backend: int,
+    ) -> tuple[Optional[cv2.VideoCapture], Optional[np.ndarray], str]:
+        # Open with the requested backend so retries can apply backend fallback deterministically.
+        cap = cv2.VideoCapture(camera_index, backend)
+        if cap is None or not cap.isOpened():
+            if cap is not None:
+                cap.release()
+            return None, None, f"backend={self._backend_name(backend)} open failed"
+
+        # Warm up startup frames and reject all-black output to catch blank-initialization states.
+        # For the Epiphan frame grabber issue, the device can appear "opened" but only deliver black frames.
+        # We treat a warmup of only-black frames as a failed startup so the code can auto-retry/reopen.
+        #
+        # Tradeoff note: If the real scene is truly black (e.g., lens cap on), this will also be treated as
+        # a startup failure. That is acceptable here because the goal is a reliable "not blank" preview.
+        deadline = time.monotonic() + CAMERA_STARTUP_WARMUP_TIMEOUT_SEC
+        checked_frames = 0
+        while (
+            checked_frames < CAMERA_STARTUP_MAX_WARMUP_FRAMES
+            and time.monotonic() < deadline
+        ):
+            checked_frames += 1
+            try:
+                ret, frame = cap.read()
+            except Exception:
+                cap.release()
+                return (
+                    None,
+                    None,
+                    f"backend={self._backend_name(backend)} read raised exception",
+                )
+            if not ret or frame is None or frame.size == 0:
+                # Keep warming up: some devices return a few empty frames right after open.
+                continue
+            if np.count_nonzero(frame) == 0:
+                # Treat "all zero pixels" as blank output and keep warming up/retrying.
+                continue
+            return cap, frame, ""
+
+        cap.release()
+        return (
+            None,
+            None,
+            (
+                f"backend={self._backend_name(backend)} warmup returned empty/black frames "
+                f"({checked_frames} checks)"
+            ),
+        )
+
+    # Summary:
+    # - Convert one BGR frame into the stream packet format with optional calibrated crop checks.
+    # - Input: `self`, `frame` (np.ndarray), `clip_rect` (tuple[int, int, int, int] | None).
+    # - Returns: `(packet, error_message)` where `packet` is None on conversion/validation failure.
+    def _build_packet_from_frame(
+        self,
+        frame: np.ndarray,
+        clip_rect: Optional[tuple[int, int, int, int]],
+    ) -> tuple[Optional[FramePacket], Optional[str]]:
+        # Validate the source payload before color conversion so invalid driver outputs fail explicitly.
+        # Some camera backends can return a "successful read" but still provide an empty array.
+        if frame is None or frame.size == 0:
+            return None, "The camera returned an empty frame. The stream has been closed."
+
+        # Convert to grayscale because downstream reconstruction expects single-channel uint8 images.
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        except cv2.error:
+            # If color conversion fails, the frame is unusable downstream, so fail the stream cleanly.
+            return None, "Failed to convert a camera frame to grayscale. The stream has been closed."
+
+        # Apply optional calibration crop only after conversion so dimensions match stream payload.
+        if clip_rect is not None:
+            clip_origin_x, clip_origin_y, clip_width, clip_height = clip_rect
+            frame_height, frame_width = gray.shape
+            clip_end_x = clip_origin_x + clip_width
+            clip_end_y = clip_origin_y + clip_height
+            # Keep strict bounds mode so invalid calibration never produces partial/out-of-range crops.
+            if (
+                clip_origin_x < 0
+                or clip_origin_y < 0
+                or clip_end_x > frame_width
+                or clip_end_y > frame_height
+            ):
+                # A bad crop means our calibration doesn't match the camera resolution.
+                # Failing fast is safer than showing misleading/shifted images.
+                return (
+                    None,
+                    "Calibration crop rectangle is outside camera frame bounds. The stream has been closed.",
+                )
+            gray = gray[clip_origin_y:clip_end_y, clip_origin_x:clip_end_x]
+
+        height, width = gray.shape
+        packet = FramePacket(
+            _now_ms(),
+            width,
+            height,
+            "gray8",
+            gray.tobytes(),
+        )
+        return packet, None
+
+    # Summary:
     # - Worker loop that opens the camera and streams frames until stopped.
-    # - Input: `self`, `camera_index` (int), `fps` (int), `stop_event` (threading.Event),
+    # - Input: `self`, `session_id` (int), `camera_index` (int), `fps` (int), `stop_event`
+    #   (threading.Event),
     #   `clip_rect` (tuple[int, int, int, int] | None) for optional calibrated cropping.
     # - Returns: None.
     def _run(
         self,
+        session_id: int,
         camera_index: int,
         fps: int,
         stop_event: threading.Event,
         clip_rect: Optional[tuple[int, int, int, int]],
     ) -> None:
-        # Open the camera inside the worker thread to keep the UI responsive.
-        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
-        self._cap = cap
-
-        if cap is None or not cap.isOpened():
-            if cap is not None:
-                cap.release()
-            self._cap = None
-            # Emit the error on the proxy so the UI thread can show the warning.
-            self._safe_emit(
-                self._proxy.error_message.emit,
-                "Failed to open the selected camera. Please try another port.",
-            )
-            # Emit the stopped state so the UI resets cleanly.
-            self._safe_emit(self._proxy.state_changed.emit, False, "camera failed")
-            # Clear the active flag so another start can be attempted.
-            with self._lock:
-                self._active = False
-            return
-
-        # Validate crop size early so invalid calibration data fails before the loop starts.
-        clip_origin_x = 0
-        clip_origin_y = 0
-        clip_width = 0
-        clip_height = 0
-        if clip_rect is not None:
-            clip_origin_x, clip_origin_y, clip_width, clip_height = clip_rect
-            if clip_width <= 0 or clip_height <= 0:
-                self._safe_emit(
-                    self._proxy.error_message.emit,
-                    "Invalid clip rectangle size detected. The stream has been closed.",
-                )
-                self._safe_emit(self._proxy.state_changed.emit, False, "camera failed")
-                with self._lock:
-                    self._active = False
-                return
-
-        # Notify the UI that camera streaming is active.
-        self._safe_emit(self._proxy.state_changed.emit, True, "camera streaming")
-
-        # Convert the requested interval (ms) into seconds for time.sleep.
-        frame_interval = max(int(fps), 1) / 1000.0
+        cap: Optional[cv2.VideoCapture] = None
+        first_frame: Optional[np.ndarray] = None
+        streaming_started = False
 
         try:
-            # Keep reading frames until the stop event is set.
-            while not stop_event.is_set():
+            # Respect a short stop->start cooldown so USB frame-grabber drivers have time to settle.
+            if not self._wait_for_start_cooldown(stop_event):
+                logger.debug(
+                    "Camera startup interrupted during cooldown (session=%s).",
+                    session_id,
+                )
+                return
+
+            # Attempt startup using backend fallback plus retry policy to reduce blank initialization states.
+            backend_attempts = self._build_backend_attempt_sequence()
+            startup_failure_reason = "Unknown startup failure."
+            for attempt_index, backend in enumerate(backend_attempts, start=1):
+                # If the user already pressed stop or a newer stream started, do not waste time opening.
+                if stop_event.is_set() or not self._is_current_session(session_id):
+                    logger.debug(
+                        "Camera startup canceled before attempt %s (session=%s).",
+                        attempt_index,
+                        session_id,
+                    )
+                    return
+
+                cap, first_frame, startup_failure_reason = self._open_validated_capture(
+                    camera_index,
+                    backend,
+                )
+                if cap is not None and first_frame is not None:
+                    logger.debug(
+                        "Camera startup success (session=%s, backend=%s, attempt=%s/%s).",
+                        session_id,
+                        self._backend_name(backend),
+                        attempt_index,
+                        len(backend_attempts),
+                    )
+                    break
+
+                logger.debug(
+                    "Camera startup failed (session=%s, backend=%s, attempt=%s/%s): %s",
+                    session_id,
+                    self._backend_name(backend),
+                    attempt_index,
+                    len(backend_attempts),
+                    startup_failure_reason,
+                )
+                if attempt_index < len(backend_attempts):
+                    # Wait briefly before retrying to avoid hammering the driver during startup recovery.
+                    if self._sleep_with_stop(stop_event, CAMERA_STARTUP_RETRY_DELAY_SEC):
+                        logger.debug(
+                            "Camera startup retry sleep interrupted by stop event (session=%s).",
+                            session_id,
+                        )
+                        return
+
+            if cap is None or first_frame is None:
+                # Emit one clear startup message after all fallback attempts are exhausted.
+                self._emit_for_session(
+                    session_id,
+                    self._proxy.error_message.emit,
+                    (
+                        "Failed to initialize the selected camera after startup retries and backend fallback. "
+                        f"Reason: {startup_failure_reason}"
+                    ),
+                )
+                self._emit_for_session(session_id, self._proxy.state_changed.emit, False, "camera failed")
+                return
+
+            # Register capture only if this worker still owns the active stream session.
+            with self._lock:
+                if session_id != self._session_id:
+                    # Another stream started while we were initializing.
+                    # Release immediately so the new stream can own the device.
+                    cap.release()
+                    return
+                self._cap = cap
+
+            # Validate crop size early so invalid calibration data fails before steady-state loop starts.
+            if clip_rect is not None:
+                _, _, clip_width, clip_height = clip_rect
+                if clip_width <= 0 or clip_height <= 0:
+                    # A non-positive crop size would crash or produce empty output; fail cleanly.
+                    self._emit_for_session(
+                        session_id,
+                        self._proxy.error_message.emit,
+                        "Invalid clip rectangle size detected. The stream has been closed.",
+                    )
+                    self._emit_for_session(
+                        session_id,
+                        self._proxy.state_changed.emit,
+                        False,
+                        "camera failed",
+                    )
+                    return
+
+            # Notify the UI only after validated startup succeeds to avoid false-running blank streams.
+            self._emit_for_session(session_id, self._proxy.state_changed.emit, True, "camera streaming")
+            streaming_started = True
+
+            # Convert the requested interval (ms) into seconds for the paced capture loop.
+            frame_interval = max(int(fps), 1) / 1000.0
+
+            # Use the first validated warmup frame as the first delivered packet.
+            first_packet, first_frame_error = self._build_packet_from_frame(first_frame, clip_rect)
+            if first_frame_error is not None:
+                # If the first validated frame still cannot be processed, stop before entering the loop.
+                self._emit_for_session(session_id, self._proxy.error_message.emit, first_frame_error)
+                return
+            if first_packet is not None:
+                self._emit_for_session(session_id, self._proxy.frame_ready.emit, first_packet)
+
+            # Keep reading frames until stop is requested or the session is replaced.
+            while not stop_event.is_set() and self._is_current_session(session_id):
                 ret, frame = cap.read()
                 if not ret:
-                    # Notify the UI once, then break to stop cleanly.
-                    self._safe_emit(
+                    # Notify once then exit so the stream can restart cleanly.
+                    self._emit_for_session(
+                        session_id,
                         self._proxy.error_message.emit,
                         "The camera stopped sending frames. The stream has been closed.",
                     )
                     break
 
-                # Convert camera frames to single-channel uint8 because reconstruction expects grayscale.
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                packet, frame_error = self._build_packet_from_frame(frame, clip_rect)
+                if frame_error is not None:
+                    # Any transform/crop failure means we can't safely stream this frame downstream.
+                    self._emit_for_session(session_id, self._proxy.error_message.emit, frame_error)
+                    break
+                if packet is not None:
+                    self._emit_for_session(session_id, self._proxy.frame_ready.emit, packet)
 
-                # Apply calibration crop only when the user provided a calibration file.
-                if clip_rect is not None:
-                    frame_height, frame_width = gray.shape
-                    clip_end_x = clip_origin_x + clip_width
-                    clip_end_y = clip_origin_y + clip_height
-                    # Strict bounds mode: fail the stream when the configured crop leaves frame bounds.
-                    if (
-                        clip_origin_x < 0
-                        or clip_origin_y < 0
-                        or clip_end_x > frame_width
-                        or clip_end_y > frame_height
-                    ):
-                        self._safe_emit(
-                            self._proxy.error_message.emit,
-                            "Calibration crop rectangle is outside camera frame bounds. The stream has been closed.",
-                        )
-                        break
-                    gray = gray[clip_origin_y:clip_end_y, clip_origin_x:clip_end_x]
-                height, width = gray.shape
-
-                # Package the grayscale frame so the UI thread can render safely.
-                packet = FramePacket(
-                    _now_ms(),
-                    width,
-                    height,
-                    "gray8",
-                    gray.tobytes(),
-                )
-                # Emit the frame via the proxy so the UI thread can pick it up.
-                self._safe_emit(self._proxy.frame_ready.emit, packet)
-
-                # Throttle the loop to the requested interval.
-                time.sleep(frame_interval)
+                # Sleep in stop-aware slices so stream switching remains responsive.
+                if self._sleep_with_stop(stop_event, frame_interval):
+                    break
         finally:
-            # Always release the camera handle when the loop ends.
-            cap.release()
-            self._cap = None
-            # Notify the UI that camera streaming ended.
-            self._safe_emit(self._proxy.state_changed.emit, False, "camera stopped")
-            # Clear the active flag so another start can be attempted.
+            # Always release the local capture handle when the worker loop ends.
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    logger.debug(
+                        "Camera release raised during worker shutdown.",
+                        exc_info=True,
+                    )
+
+            emit_stopped_state = False
             with self._lock:
-                self._active = False
+                # Clear global capture pointer only when it still points to this worker's capture.
+                if self._cap is cap:
+                    self._cap = None
+                # Only the active session should mutate active/thread state.
+                if session_id == self._session_id:
+                    # Only the current session can change the "active" flag.
+                    # This prevents an older thread from marking the worker idle while a newer stream is running.
+                    self._active = False
+                    self._thread = None
+                    emit_stopped_state = streaming_started
+
+            # Emit stopped only for the active stream session to prevent stale UI resets.
+            if emit_stopped_state:
+                self._emit_for_session(
+                    session_id,
+                    self._proxy.state_changed.emit,
+                    False,
+                    "camera stopped",
+                )
+            elif streaming_started:
+                logger.debug(
+                    "Suppressed stale stop-state emit (session=%s).",
+                    session_id,
+                )
 
 
 # Summary:
@@ -1113,8 +1449,10 @@ class BModeWidget(QWidget):
         self.ui.lineEdit_bmode_recorddir.setEnabled(False)
         self.ui.pushButton_bmode_recorddirBrowse.setEnabled(False)
         self.ui.pushButton_bmode_recorddirClear.setEnabled(False)
+
         # UI state change: update the record button to show stop intent.
         self.ui.pushButton_bmode_recordStream.setText("Stop Recording")
+        
         # UI state change: show a clear visual indicator on the image label while recording is active.
         self._set_bmode_recording_indicator(active=True)
 
@@ -1129,6 +1467,7 @@ class BModeWidget(QWidget):
 
         # Stop the recording worker so it can flush and close cleanly.
         self._image_record_worker.stop(reason)
+
         # Reset external state so normal per-frame recording can resume later.
         self._external_recording_active = False
 
@@ -1136,8 +1475,10 @@ class BModeWidget(QWidget):
         self.ui.lineEdit_bmode_recorddir.setEnabled(True)
         self.ui.pushButton_bmode_recorddirBrowse.setEnabled(True)
         self.ui.pushButton_bmode_recorddirClear.setEnabled(True)
+
         # UI state change: restore the record button text.
         self.ui.pushButton_bmode_recordStream.setText("Record")
+
         # UI state change: remove the recording indicator and restore the original label style.
         self._set_bmode_recording_indicator(active=False)
 
@@ -1189,7 +1530,7 @@ class BModeWidget(QWidget):
     # - Input: `self`, `active` (bool).
     # - Returns: None.
     def set_recording_indicator(self, active: bool) -> None:
-        # WHY: Keep indicator style ownership inside this widget even when recording is started elsewhere.
+        # Keep indicator style ownership inside this widget even when recording is started elsewhere.
         self._set_bmode_recording_indicator(active=active)
 
     # Summary:

@@ -1,2 +1,4 @@
+.idea/
+.pycache_tmp/
 seqs/
 __pycache__/
