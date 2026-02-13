@@ -22,6 +22,7 @@ from matplotlib.backends.backend_qtagg import (
 )
 from matplotlib.figure import Figure
 from PySide6.QtCore import QObject, Qt, QTimer, QSize, Signal
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 # Generated UI class from Qt Designer (do not edit the _ui.py file).
@@ -225,6 +226,7 @@ class Mocap3DCanvas(FigureCanvas):
 class MocapStreamProxy(QObject):
     text_ready = Signal(str)
     poses_ready = Signal(int, object)
+    stream_health_ready = Signal(int, int, int, float, bool)
     state_changed = Signal(bool, str)
     record_message = Signal(str)
     record_stop = Signal(str)
@@ -721,6 +723,10 @@ class QtmStreamWorker:
 
         # Cache body names so packet formatting uses stable labels.
         self._body_names: list[str] = []
+        # Keep a short rolling window so we can estimate stream cadence cheaply per packet.
+        self._health_window_start_ts = time.monotonic()
+        self._health_window_frame_count = 0
+        self._health_fps_estimate = 0.0
 
         # Lock protects loop/body name updates across threads.
         self._lock = threading.Lock()
@@ -916,6 +922,19 @@ class QtmStreamWorker:
         return poses
 
     # Summary:
+    # - Check whether a pose matrix contains finite rigid-body data.
+    # - Input: `pose_matrix` (object).
+    # - Returns: True when the pose is a finite 4x4 matrix, otherwise False (bool).
+    @staticmethod
+    def _is_valid_pose_matrix(pose_matrix: object) -> bool:
+        # Validation/transforms: only count finite 4x4 poses as detected bodies.
+        if not isinstance(pose_matrix, np.ndarray):
+            return False
+        if pose_matrix.shape != (4, 4):
+            return False
+        return bool(np.isfinite(pose_matrix).all())
+
+    # Summary:
     # - Start the QTM streaming thread for the given IP address.
     # - Input: `self`, `ip_address` (str).
     # - Returns: None.
@@ -1057,6 +1076,10 @@ class QtmStreamWorker:
                 self._body_names = list(body_names)
 
             # Notify the UI that streaming has started successfully.
+            # Reset health counters at stream start so cadence is measured per active stream session.
+            self._health_window_start_ts = time.monotonic()
+            self._health_window_frame_count = 0
+            self._health_fps_estimate = 0.0
             self._safe_emit(
                 self._proxy.state_changed.emit,
                 True, f"Connected to QTM at {ip_address}:{QTM_PORT}"
@@ -1107,27 +1130,50 @@ class QtmStreamWorker:
                 connection.disconnect()
 
     # Summary:
-    # - Handle incoming QTM packets and forward formatted text to the UI.
+    # - Handle incoming QTM packets and forward pose/health data to the UI.
     # - Input: `self`, `packet` (qtm_rt.QRTPacket).
     # - Returns: None.
     def _on_packet(self, packet) -> None:
-        # Read the 6D residual component once so text and plot stay in sync.
+        # Read the 6D residual component once so pose, health, and recording use the same packet view.
         result = packet.get_6d_residual()
 
         # Snapshot body names so formatting uses stable labels.
         with self._lock:
             body_names = list(self._body_names)
 
-        # Format the packet defensively so missing components do not break the stream.
-        text = self._format_6d_residual_text(packet, body_names, result)
         # Build a stable pose mapping aligned with body_names for the plot.
         poses_qtm = self._extract_6d_poses(result, body_names)
         # Timestamp the rigid body packet at PC-receive time for software coupling.
         rigidbody_ts_ms = _now_ms()
-        # Emit the text from the worker thread to the UI thread.
-        self._safe_emit(self._proxy.text_ready.emit, text)
+        # Compute compact stream-health metrics so the UI can log one readable summary line periodically.
+        n_bodies_total = len(body_names) if body_names else len(poses_qtm)
+        n_bodies_detected = sum(
+            1
+            for pose_matrix in poses_qtm.values()
+            if self._is_valid_pose_matrix(pose_matrix)
+        )
+        # Track packet cadence in a rolling monotonic window to estimate FPS-like health cheaply.
+        self._health_window_frame_count += 1
+        now_ts = time.monotonic()
+        elapsed = now_ts - self._health_window_start_ts
+        if elapsed >= 0.5:
+            if elapsed > 0.0:
+                self._health_fps_estimate = self._health_window_frame_count / elapsed
+            # Reset rolling window so the cadence estimate stays responsive.
+            self._health_window_start_ts = now_ts
+            self._health_window_frame_count = 0
+        has_6d_data = result is not None
         # Emit the timestamped rigid body packet from worker thread to UI thread.
         self._safe_emit(self._proxy.poses_ready.emit, rigidbody_ts_ms, poses_qtm)
+        # Emit compact health stats using the same safe proxy signal pathway.
+        self._safe_emit(
+            self._proxy.stream_health_ready.emit,
+            int(packet.framenumber),
+            int(n_bodies_total),
+            int(n_bodies_detected),
+            float(self._health_fps_estimate),
+            bool(has_6d_data),
+        )
 
         # Forward the result to the recorder without touching any UI state.
         self._recorder.handle_6d_residual_result(result)
@@ -1162,11 +1208,26 @@ class MocapWidget(QWidget):
 
         # Keep the text area readable but non-editable for incoming stream data.
         self.ui.plainTextEdit_mocap_textStream.setReadOnly(True)
+        # UI state change: disable undo history because the log is append-only and should stay lightweight.
+        self.ui.plainTextEdit_mocap_textStream.setUndoRedoEnabled(False)
         # Enable the widget so stream output is visible even though editing is blocked.
         self.ui.plainTextEdit_mocap_textStream.setEnabled(True)
 
         # Track the streaming state so the button can toggle cleanly.
         self._stream_state = "idle"
+        # Keep the mocap text stream bounded so long sessions do not grow widget memory unbounded.
+        self._textstream_max_lines = 200
+        # Track the most recent raw line so short duplicate bursts can be debounced.
+        self._last_textstream_line = ""
+        self._last_textstream_line_ts = 0.0
+        # Keep the latest stream-health sample so health logs can be rate-limited on the UI thread.
+        self._last_health_log_ts = 0.0
+        self._health_log_interval_sec = 1.0
+        self._latest_health_frame_number: Optional[int] = None
+        self._latest_health_n_bodies_total = 0
+        self._latest_health_n_bodies_detected = 0
+        self._latest_health_fps_estimate = 0.0
+        self._latest_health_has_6d_data = False
 
         # Build the Matplotlib canvas and place it in the prepared UI container.
         self._mocap_canvas = Mocap3DCanvas(self)
@@ -1204,6 +1265,10 @@ class MocapWidget(QWidget):
         self._stream_proxy.text_ready.connect(self._on_mocapStreamProxy_text_ready)
         # Signal connection: route background pose updates into the UI thread.
         self._stream_proxy.poses_ready.connect(self._on_mocapStreamProxy_poses_ready)
+        # Signal connection: route worker health snapshots into the UI thread for periodic log output.
+        self._stream_proxy.stream_health_ready.connect(
+            self._on_mocapStreamProxy_stream_health_ready
+        )
         # Signal connection: react to state changes from the stream thread (connected, stopped, errors).
         self._stream_proxy.state_changed.connect(self._on_mocapStreamProxy_state_changed)
         # Signal connection: show recording warnings or info on the UI thread.
@@ -1238,6 +1303,8 @@ class MocapWidget(QWidget):
         self.ui.comboBox_mocap_systemSelect.setCurrentText("Qualisys")
         # Disable recording until streaming is active.
         self.ui.pushButton_mocap_record.setEnabled(False)
+        # Initial feedback: make the first state explicit so users know how to begin.
+        self._log_mocap_event("Idle. Enter QTM IP and press Open Stream.", level="INFO")
 
     # Summary:
     # - Slot function that handles the open/close stream button click.
@@ -1361,9 +1428,10 @@ class MocapWidget(QWidget):
         self.ui.pushButton_mocap_record.setEnabled(False)
         # Change the button label so a second click stops the connection attempt.
         self.ui.pushButton_mocap_openStream.setText("Stop Stream")
-        # Provide immediate feedback in the text area.
-        self.ui.plainTextEdit_mocap_textStream.setPlainText(
-            f"Connecting to {ip_address}:{QTM_PORT}..."
+        # Log the connection attempt so users can see explicit stream lifecycle intent.
+        self._log_mocap_event(
+            f"Connecting to {ip_address}:{QTM_PORT}...",
+            level="INFO",
         )
 
         # Clear the plot and cache so stale points are not shown during a new connect.
@@ -1386,32 +1454,131 @@ class MocapWidget(QWidget):
         self._stream_worker.stop()
 
     # Summary:
-    # - Slot function that updates the UI text area with the latest stream data.
+    # - Append one debounced line to the mocap log console.
+    # - What it does: Adds a timestamp, enforces bounded log size, and keeps the view scrolled to the latest line.
+    # - Input: `self`, `line` (str).
+    # - Returns: None.
+    def _append_mocap_textstream(self, line: str) -> None:
+        # Normalize and ignore empty lines so the console only contains useful entries.
+        line_text = str(line).strip()
+        if not line_text:
+            return
+
+        # Debounce repeated identical lines so rapid worker callbacks do not spam the console.
+        now_ts = time.monotonic()
+        if (
+            line_text == self._last_textstream_line
+            and (now_ts - self._last_textstream_line_ts) < 1.0
+        ):
+            return
+        self._last_textstream_line = line_text
+        self._last_textstream_line_ts = now_ts
+
+        # Prefix with local wall-clock time so users can correlate events across widgets.
+        timestamp_text = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        formatted_line = f"[{timestamp_text}] {line_text}"
+        self.ui.plainTextEdit_mocap_textStream.appendPlainText(formatted_line)
+
+        # Trim old lines from the top so long sessions keep memory usage stable.
+        document = self.ui.plainTextEdit_mocap_textStream.document()
+        while document.blockCount() > int(self._textstream_max_lines):
+            cursor = QTextCursor(document)
+            cursor.movePosition(QTextCursor.Start)
+            cursor.select(QTextCursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            # Remove the trailing newline left after deleting the first block.
+            cursor.deleteChar()
+
+        # Keep the latest line visible after append/trim so the console behaves like a live activity feed.
+        cursor = self.ui.plainTextEdit_mocap_textStream.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.ui.plainTextEdit_mocap_textStream.setTextCursor(cursor)
+        self.ui.plainTextEdit_mocap_textStream.ensureCursorVisible()
+
+    # Summary:
+    # - Log one mocap lifecycle event with a normalized level label.
+    # - What it does: Formats one human-readable line and sends it through the bounded text-stream helper.
+    # - Input: `self`, `message` (str), `level` (str).
+    # - Returns: None.
+    def _log_mocap_event(self, message: str, *, level: str = "INFO") -> None:
+        # Normalize message/level so every entry has a consistent and readable structure.
+        message_text = str(message).strip()
+        if not message_text:
+            return
+        level_text = (level or "INFO").upper()
+        self._append_mocap_textstream(f"[{level_text}] {message_text}")
+
+    # Summary:
+    # - Log periodic stream-health snapshots at a fixed cadence.
+    # - What it does: Converts the latest worker health metrics into one concise line and rate-limits output.
+    # - Input: `self`.
+    # - Returns: None.
+    def _log_stream_health(self) -> None:
+        # Only emit health snapshots while streaming; ignore stale packets when the UI is idle.
+        if self._stream_state != "streaming":
+            return
+        if self._latest_health_frame_number is None:
+            return
+
+        # Rate-limit health lines so users get readable status without per-packet spam.
+        now_ts = time.monotonic()
+        if (now_ts - self._last_health_log_ts) < self._health_log_interval_sec:
+            return
+        self._last_health_log_ts = now_ts
+
+        # Build a compact line that highlights frame index, detected bodies, and cadence.
+        health_line = (
+            "Stream OK | "
+            f"Frame={self._latest_health_frame_number} | "
+            "Bodies: detected "
+            f"{self._latest_health_n_bodies_detected}/{self._latest_health_n_bodies_total}"
+        )
+        if not self._latest_health_has_6d_data:
+            health_line += " (no 6D this frame)"
+        health_line += f" | FPS~{self._latest_health_fps_estimate:.1f}"
+        self._append_mocap_textstream(health_line)
+
+    # Summary:
+    # - Slot function that updates the activity log from proxy text messages.
     # - Input: `self`, `text` (str).
     # - Returns: None.
     def _on_mocapStreamProxy_text_ready(self, text: str) -> None:
-        # Replace the text each time so only the latest frame is shown.
-        self.ui.plainTextEdit_mocap_textStream.setPlainText(text)
+        # Slot function: route proxy text to the bounded log console on the UI thread.
+        self._log_mocap_event(text, level="INFO")
 
     # Summary:
     # - Slot function that reacts to stream state changes and updates UI controls accordingly.
     # - Input: `self`, `is_running` (bool), `message` (str).
     # - Returns: None.
     def _on_mocapStreamProxy_state_changed(self, is_running: bool, message: str) -> None:
-        # Always display the latest status message in the text area.
+        # Slot function: keep stream lifecycle messages visible in the bounded activity log.
         if message:
-            self.ui.plainTextEdit_mocap_textStream.setPlainText(message)
+            self._log_mocap_event(
+                message,
+                level="INFO" if is_running else "WARN",
+            )
 
         if is_running:
             # Mark the UI as streaming so users know the connection is live.
             self._stream_state = "streaming"
+
+            # Reset health timing/state at stream start so periodic logs begin fresh for this session.
+            self._last_health_log_ts = 0.0
+            self._latest_health_frame_number = None
+            self._latest_health_n_bodies_total = 0
+            self._latest_health_n_bodies_detected = 0
+            self._latest_health_fps_estimate = 0.0
+            self._latest_health_has_6d_data = False
             self.ui.pushButton_mocap_openStream.setText("Stop Stream")
+
             # Keep inputs disabled while streaming to prevent changing live settings.
             self.ui.comboBox_mocap_systemSelect.setEnabled(False)
             self.ui.lineEdit_mocap_ip.setEnabled(False)
+
             # Clear cached plot state and start the timer for throttled redraws.
             self._reset_plot_state()
             self._plot_timer.start()
+            
             # UI state change: enable recording only when streaming is active.
             self.ui.pushButton_mocap_record.setEnabled(True)
             return
@@ -1419,13 +1586,24 @@ class MocapWidget(QWidget):
         # Reset UI controls after the stream stops or fails.
         self._stream_state = "idle"
         self.ui.pushButton_mocap_openStream.setText("Open Stream")
+
         # Re-enable inputs so the user can change settings before reconnecting.
         self.ui.comboBox_mocap_systemSelect.setEnabled(True)
         self.ui.lineEdit_mocap_ip.setEnabled(True)
+
         # Stop plot updates immediately when the stream stops or drops.
         self._plot_timer.stop()
+
         # Clear plot data so the stopped state is visually empty.
         self._reset_plot_state()
+
+        # Reset health timing/state so idle periods do not leak into the next stream.
+        self._last_health_log_ts = 0.0
+        self._latest_health_frame_number = None
+        self._latest_health_n_bodies_total = 0
+        self._latest_health_n_bodies_detected = 0
+        self._latest_health_fps_estimate = 0.0
+        self._latest_health_has_6d_data = False
         # Stop recording if the stream is no longer running.
         if self._record_worker.is_active():
             self._stop_recording("Recording stopped because streaming ended.")
@@ -1437,21 +1615,43 @@ class MocapWidget(QWidget):
     # - Input: `self`, `message` (str).
     # - Returns: None.
     def _on_mocapStreamProxy_record_message(self, message: str) -> None:
-        # Show the latest recording message so the user can react quickly.
+        # Slot function: keep non-fatal recording warnings visible in the same bounded activity log.
         if message:
-            self.ui.plainTextEdit_mocap_textStream.setPlainText(message)
+            self._log_mocap_event(f"RECORD: {message}", level="WARN")
 
     # Summary:
     # - Slot function that stops recording when background threads request it.
     # - Input: `self`, `reason` (str).
     # - Returns: None.
     def _on_mocapStreamProxy_record_stop(self, reason: str) -> None:
+        # Slot function: surface record-stop reasons in the activity log before changing worker/UI state.
+        if reason:
+            self._log_mocap_event(f"RECORD: {reason}", level="WARN")
         # Stop recording safely on the UI thread when an error or overload occurs.
         if self._record_worker.is_active():
-            self._stop_recording(reason)
-        elif reason:
-            # Still surface the message even if recording already stopped.
-            self.ui.plainTextEdit_mocap_textStream.setPlainText(reason)
+            # Skip duplicate reason logging because this slot already logged the stop cause.
+            self._stop_recording(reason, log_reason=False)
+
+    # Summary:
+    # - Slot function that receives worker health metrics and triggers periodic log output.
+    # - Input: `self`, `frame_number` (int), `n_bodies_total` (int), `n_bodies_detected` (int),
+    #   `fps_estimate` (float), `has_6d_data` (bool).
+    # - Returns: None.
+    def _on_mocapStreamProxy_stream_health_ready(
+        self,
+        frame_number: int,
+        n_bodies_total: int,
+        n_bodies_detected: int,
+        fps_estimate: float,
+        has_6d_data: bool,
+    ) -> None:
+        # Slot function: cache worker health samples so logging cadence is controlled on the UI thread.
+        self._latest_health_frame_number = int(frame_number)
+        self._latest_health_n_bodies_total = int(n_bodies_total)
+        self._latest_health_n_bodies_detected = int(n_bodies_detected)
+        self._latest_health_fps_estimate = float(fps_estimate)
+        self._latest_health_has_6d_data = bool(has_6d_data)
+        self._log_stream_health()
 
     # Summary:
     # - Slot function that caches the latest QTM poses for the plot timer.
@@ -1682,16 +1882,17 @@ class MocapWidget(QWidget):
         self.ui.pushButton_mocap_record.setText("Stop Recording")
         # UI state change: show a clear visual indicator around the mocap plot while recording is active.
         self._set_mocap_recording_indicator(active=True)
-        # Provide immediate feedback about the active recording file.
-        self.ui.plainTextEdit_mocap_textStream.setPlainText(
-            f"Recording to {record_file_path}"
+        # Log recording start so the destination path remains visible in the activity log.
+        self._log_mocap_event(
+            f"RECORD: Recording to {record_file_path}",
+            level="INFO",
         )
 
     # Summary:
     # - Stop the active CSV recording session and release writer resources.
-    # - Input: `self`, `reason` (str).
+    # - Input: `self`, `reason` (str), `log_reason` (bool).
     # - Returns: None.
-    def _stop_recording(self, reason: str = "") -> None:
+    def _stop_recording(self, reason: str = "", *, log_reason: bool = True) -> None:
         # Avoid redundant work when recording is already stopped.
         if not self._record_worker.is_active():
             return
@@ -1710,9 +1911,9 @@ class MocapWidget(QWidget):
         # Keep the record button enabled only while streaming.
         self.ui.pushButton_mocap_record.setEnabled(self._stream_state == "streaming")
 
-        # Show the stop reason so the user understands why recording ended.
-        if reason:
-            self.ui.plainTextEdit_mocap_textStream.setPlainText(reason)
+        # Log the stop reason so recording lifecycle events remain visible after UI state changes.
+        if reason and log_reason:
+            self._log_mocap_event(f"RECORD: {reason}", level="INFO")
 
     # Summary:
     # - Update the mocap plot-container border to indicate whether recording is active.

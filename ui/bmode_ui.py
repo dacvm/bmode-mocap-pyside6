@@ -77,6 +77,10 @@ class Ui_Form(object):
 
         self.plainTextEdit_bmode_textStream = QPlainTextEdit(Form)
         self.plainTextEdit_bmode_textStream.setObjectName(u"plainTextEdit_bmode_textStream")
+        font = QFont()
+        font.setFamilies([u"Courier"])
+        font.setPointSize(9)
+        self.plainTextEdit_bmode_textStream.setFont(font)
 
         self.verticalLayout_bmode_menu.addWidget(self.plainTextEdit_bmode_textStream)
 

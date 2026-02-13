@@ -1271,7 +1271,7 @@ class BModeWidget(QWidget):
             recording_active = bool(context.get("recording_active", False))
             recording_text = "on" if recording_active else "off"
             message_text = (
-                f"Health: {fps_estimate:.1f} FPS, recording={recording_text}."
+                f"FPS~{fps_estimate:.1f}, recording={recording_text}."
             )
 
         # Fallback formatting: include event name and structured key/value fields.

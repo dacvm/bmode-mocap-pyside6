@@ -90,7 +90,14 @@
         </widget>
        </item>
        <item>
-        <widget class="QPlainTextEdit" name="plainTextEdit_bmode_textStream"/>
+        <widget class="QPlainTextEdit" name="plainTextEdit_bmode_textStream">
+         <property name="font">
+          <font>
+           <family>Courier</family>
+           <pointsize>9</pointsize>
+          </font>
+         </property>
+        </widget>
        </item>
        <item>
         <layout class="QHBoxLayout" name="horizontalLayout_bmode_recorddir">

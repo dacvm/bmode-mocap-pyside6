@@ -56,8 +56,8 @@ class Ui_Form(object):
         self.plainTextEdit_mocap_textStream.setObjectName(u"plainTextEdit_mocap_textStream")
         self.plainTextEdit_mocap_textStream.setEnabled(True)
         font = QFont()
-        font.setFamilies([u"Courier New"])
-        font.setPointSize(7)
+        font.setFamilies([u"Courier"])
+        font.setPointSize(9)
         self.plainTextEdit_mocap_textStream.setFont(font)
 
         self.verticalLayout_mocap_menu.addWidget(self.plainTextEdit_mocap_textStream)
