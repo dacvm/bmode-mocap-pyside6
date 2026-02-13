@@ -1118,6 +1118,9 @@ class BModeWidget(QWidget):
         # Track a small health window so we can report stream FPS without per-frame log spam.
         self._health_window_start_ts = time.monotonic()
         self._health_window_frame_count = 0
+        # Track health-log cadence separately so rate-limiting follows the same pattern as mocap.
+        self._last_health_log_ts = 0.0
+        self._health_log_interval_sec = 2.0
 
         # Timer to throttle rendering so the UI thread stays responsive.
         self._display_timer = QTimer(self)
@@ -1292,31 +1295,44 @@ class BModeWidget(QWidget):
         self._append_bmode_textstream(level, message_text)
 
     # Summary: Log periodic stream health snapshots at a fixed cadence.
-    # What it does: Converts cached frame counters into an FPS estimate and logs it without per-frame spam.
+    # What it does: Rate-limits health logs, builds one compact status line, and avoids per-frame text spam.
     # Input: `self`.
     # Returns: `None`.
     def _log_stream_health(self) -> None:
         # Only emit health snapshots while stream state is active.
         if not self._is_streaming:
             return
-
-        # Use a 2-second window so the estimate is stable and the text stream remains readable.
-        now_ts = time.monotonic()
-        elapsed = now_ts - self._health_window_start_ts
-        if elapsed < 2.0:
+        if self._health_window_frame_count <= 0:
             return
-        fps_estimate = 0.0
-        if elapsed > 0:
-            fps_estimate = self._health_window_frame_count / elapsed
-        # Reset the rolling window after each emitted health sample.
+
+        # Rate-limit health lines with a dedicated timestamp gate to avoid per-frame text spam.
+        now_ts = time.monotonic()
+        if (now_ts - self._last_health_log_ts) < self._health_log_interval_sec:
+            return
+        self._last_health_log_ts = now_ts
+
+        # Keep using the rolling frame window to estimate observed stream cadence.
+        elapsed = now_ts - self._health_window_start_ts
+        if elapsed <= 0.0:
+            return
+
+        # Convert sampled frames into an FPS estimate for this health window.
+        fps_estimate = self._health_window_frame_count / elapsed
+
+        # Reset the rolling window after each emitted health snapshot.
+        frame_count = int(self._health_window_frame_count)
         self._health_window_start_ts = now_ts
         self._health_window_frame_count = 0
-        self._log_bmode_event(
-            "health",
-            level="INFO",
-            fps_estimate=fps_estimate,
-            recording_active=self._image_record_worker.is_active(),
+
+        # Build a compact health line that mirrors the mocap status style.
+        recording_text = "on" if self._image_record_worker.is_active() else "off"
+        health_line = (
+            "Stream OK | "
+            f"Frames={frame_count} | "
+            f"FPS~{fps_estimate:.1f} | "
+            f"Recording={recording_text}"
         )
+        self._append_bmode_textstream("INFO", health_line)
 
     # Summary: Scan for available cameras and show them in the dropdown.
     # What it does: Tries a small set of camera indices and adds the ones that open successfully.
@@ -2077,9 +2093,10 @@ class BModeWidget(QWidget):
         if is_running:
             # Update state so the open button toggles to stop.
             self._is_streaming = True
-            # Reset health counters at stream start so FPS is measured per active session.
+            # Reset health counters and timing gates at stream start for a clean session baseline.
             self._health_window_start_ts = time.monotonic()
             self._health_window_frame_count = 0
+            self._last_health_log_ts = 0.0
             # UI state change: show stop intent while streaming.
             self.ui.pushButton_bmode_openStream.setText("Stop Stream")
             # UI state change: lock inputs so settings are stable while streaming.
@@ -2116,9 +2133,10 @@ class BModeWidget(QWidget):
         self._latest_frame_packet = None
         self._latest_image_ts_ms = None
         self._latest_image_data = None
-        # Reset health counters so idle periods do not affect the next stream window.
+        # Reset health counters and timing gate so idle periods do not affect the next stream window.
         self._health_window_start_ts = time.monotonic()
         self._health_window_frame_count = 0
+        self._last_health_log_ts = 0.0
         self.ui.label_bmode_image.clear()
 
     # Summary: Slot function that shows worker errors on the UI thread.
@@ -2256,9 +2274,10 @@ class BModeWidget(QWidget):
         self._latest_frame_packet = None
         self._latest_image_ts_ms = None
         self._latest_image_data = None
-        # Reset health counters so stale frame counts do not leak across stream sessions.
+        # Reset health counters and timing gate so stale state does not leak across stream sessions.
         self._health_window_start_ts = time.monotonic()
         self._health_window_frame_count = 0
+        self._last_health_log_ts = 0.0
         self.ui.label_bmode_image.clear()
 
     # Summary: Handle the window close event.
