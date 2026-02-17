@@ -45,17 +45,6 @@ VOLUME_THRESHOLD_DEBOUNCE_MS = 100
 # - Matplotlib canvas that renders volume geometry points in 3D.
 # - What it does: owns a Figure, a 3D Axes, and a persistent scatter handle for updates.
 class Volume3DCanvas(FigureCanvas):
-    # Base transform to map QTM's Y-up world into Matplotlib's Z-up world.
-    T_base = np.array(
-        [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
-        dtype=float,
-    )
-
     # Summary:
     # - Initialize the 3D scatter plot with an empty data set.
     # - Input: `self`, `parent` (QWidget | None).
@@ -84,10 +73,10 @@ class Volume3DCanvas(FigureCanvas):
 
         # Disable autoscale so the camera stays stable after we set limits.
         self._axes.set_autoscale_on(False)
-        # Label axes so users know the coordinate directions (Z is up after the base transform).
+        # Label axes so users know the coordinate directions.
         self._axes.set_xlabel("X")
         self._axes.set_ylabel("Y")
-        self._axes.set_zlabel("Z (Up)")
+        self._axes.set_zlabel("Z")
         # Hide all 3D panes so only points and axes remain visible.
         self._axes.xaxis.pane.set_visible(False)
         self._axes.yaxis.pane.set_visible(False)
@@ -101,94 +90,6 @@ class Volume3DCanvas(FigureCanvas):
         # Ensure the canvas is parented to the widget tree if provided.
         if parent is not None:
             self.setParent(parent)
-
-    # Summary:
-    # - Convert world points from raw QTM frame into the Matplotlib plot frame.
-    # - Input: `self`, `points_xyz` (np.ndarray | None).
-    # - Returns: points in plot frame as shape (N, 3), or an empty array when input is invalid.
-    def _transform_points_to_plot_frame(
-        self,
-        points_xyz: Optional[np.ndarray],
-    ) -> np.ndarray:
-        # Validation/transforms: treat missing points as empty so callers can clear safely.
-        if points_xyz is None:
-            return np.empty((0, 3), dtype=float)
-
-        # Validation/transforms: normalize to float array for stable matrix math.
-        points_array = np.asarray(points_xyz, dtype=float)
-        # Validation/transforms: require Nx3 coordinates so the transform is well-defined.
-        if points_array.ndim != 2 or points_array.shape[1] != 3:
-            return np.empty((0, 3), dtype=float)
-        # Validation/transforms: short-circuit empty arrays to avoid unnecessary operations.
-        if points_array.size == 0:
-            return np.empty((0, 3), dtype=float)
-
-        # Validation/transforms: convert Nx3 Cartesian points into homogeneous Nx4 points.
-        # We append w=1 so translation in T_base is applied in one matrix multiply.
-        ones_column = np.ones((points_array.shape[0], 1), dtype=float)
-        points_h = np.concatenate([points_array, ones_column], axis=1)
-
-        # Apply the rigid-body homogeneous transform in vectorized form.
-        points_plot_h = points_h @ self.T_base.T
-
-        # Convert homogeneous coordinates back to Cartesian 3D points.
-        # For rigid transforms w should stay 1, but we guard against near-zero values.
-        w_values = points_plot_h[:, 3:4]
-        safe_w_values = np.where(np.abs(w_values) > 1e-12, w_values, 1.0)
-        points_plot = points_plot_h[:, :3] / safe_w_values
-        return points_plot
-
-    # Summary:
-    # - Transform axis-aligned raw-frame bounds into plot-frame bounds.
-    # - Input: `self`, `min_xyz` (np.ndarray | None), `max_xyz` (np.ndarray | None).
-    # - Returns: (min_plot_xyz, max_plot_xyz) or None when bounds are unavailable/invalid.
-    def _transform_bounds_to_plot_frame(
-        self,
-        min_xyz: Optional[np.ndarray],
-        max_xyz: Optional[np.ndarray],
-    ) -> Optional[tuple[np.ndarray, np.ndarray]]:
-        # Validation/transforms: require both min and max vectors to build a bounds box.
-        if min_xyz is None or max_xyz is None:
-            return None
-
-        # Validation/transforms: normalize to flat float vectors for robust comparisons.
-        min_array = np.asarray(min_xyz, dtype=float).reshape(-1)
-        max_array = np.asarray(max_xyz, dtype=float).reshape(-1)
-        # Validation/transforms: require 3D bounds vectors before building corners.
-        if min_array.size != 3 or max_array.size != 3:
-            return None
-        # Validation/transforms: reject non-finite bounds so limits never become NaN/Inf.
-        if not np.all(np.isfinite(min_array)) or not np.all(np.isfinite(max_array)):
-            return None
-
-        # Ensure low/high are ordered per axis even if input min/max arrive swapped.
-        lower = np.minimum(min_array, max_array)
-        upper = np.maximum(min_array, max_array)
-
-        # Build all 8 AABB corners so transformed bounds stay correct after axis rotation.
-        corners = np.array(
-            [
-                [lower[0], lower[1], lower[2]],
-                [lower[0], lower[1], upper[2]],
-                [lower[0], upper[1], lower[2]],
-                [lower[0], upper[1], upper[2]],
-                [upper[0], lower[1], lower[2]],
-                [upper[0], lower[1], upper[2]],
-                [upper[0], upper[1], lower[2]],
-                [upper[0], upper[1], upper[2]],
-            ],
-            dtype=float,
-        )
-
-        # Apply the same point transform so bounds use the exact plot frame as scatter points.
-        corners_plot = self._transform_points_to_plot_frame(corners)
-        if corners_plot.size == 0:
-            return None
-
-        # Collapse transformed corners to plot-space min/max extents.
-        min_plot_xyz = corners_plot.min(axis=0)
-        max_plot_xyz = corners_plot.max(axis=0)
-        return min_plot_xyz, max_plot_xyz
 
     # Summary:
     # - Update the scatter points and axes bounds from a geometry-building result.
@@ -207,22 +108,15 @@ class Volume3DCanvas(FigureCanvas):
             self.clear_points()
             return
 
-        # Validation/transforms: convert incoming world points into the plot frame.
-        points_plot = self._transform_points_to_plot_frame(points_xyz)
-        # Validation/transforms: clear when shape/data is invalid so we do not draw stale points.
-        if points_plot.size == 0:
-            self.clear_points()
-            return
-
         # Update the existing scatter in place to avoid reallocating artists.
         self._scatter._offsets3d = (
-            points_plot[:, 0],
-            points_plot[:, 1],
-            points_plot[:, 2],
+            points_xyz[:, 0],
+            points_xyz[:, 1],
+            points_xyz[:, 2],
         )
 
         # Apply intensity-based colors when we have a matching vector.
-        if intensities is not None and intensities.size == points_plot.shape[0]:
+        if intensities is not None and intensities.size == points_xyz.shape[0]:
             vals = np.asarray(intensities, dtype=float)
             self._scatter.set_array(vals)
 
@@ -235,17 +129,14 @@ class Volume3DCanvas(FigureCanvas):
             # Clear colors so Matplotlib falls back to defaults for empty or mismatched data.
             self._scatter.set_array(np.array([], dtype=float))
 
-        # Validation/transforms: use transformed bounds so axes match transformed points.
-        bounds_plot = self._transform_bounds_to_plot_frame(min_xyz, max_xyz)
-        if bounds_plot is not None:
-            min_plot_xyz, max_plot_xyz = bounds_plot
-            # Add a small margin so points do not touch the plot edges.
-            span = max_plot_xyz - min_plot_xyz
+        # Update bounds when they are available so the view fits the data.
+        if min_xyz is not None and max_xyz is not None:
+            span = max_xyz - min_xyz
             margin = np.maximum(span * 0.1, 1.0)
 
-            self._axes.set_xlim(min_plot_xyz[0] - margin[0], max_plot_xyz[0] + margin[0])
-            self._axes.set_ylim(min_plot_xyz[1] - margin[1], max_plot_xyz[1] + margin[1])
-            self._axes.set_zlim(min_plot_xyz[2] - margin[2], max_plot_xyz[2] + margin[2])
+            self._axes.set_xlim(min_xyz[0] - margin[0], max_xyz[0] + margin[0])
+            self._axes.set_ylim(min_xyz[1] - margin[1], max_xyz[1] + margin[1])
+            self._axes.set_zlim(min_xyz[2] - margin[2], max_xyz[2] + margin[2])
             self._has_bounds = True
         elif not self._has_bounds:
             # Keep a fallback view if bounds are missing on the first update.
