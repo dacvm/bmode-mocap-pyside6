@@ -74,6 +74,8 @@ class Mocap3DCanvas(FigureCanvas):
         # Build the figure and axes once so we can update without clearing every frame.
         figure = Figure()
         axes = figure.add_subplot(111, projection="3d")
+        # UI state change: enable tight layout so axis labels are not clipped in embedded Qt layouts.
+        figure.set_tight_layout(True)
         super().__init__(figure)
 
         # Keep a reference to the axes for fast updates later.
@@ -756,6 +758,7 @@ class CsvRecordWorker:
                     continue
 
                 # QTM packs Rot[0..8] column-wise, so we must reshape with Fortran order.
+                # Reference: https://docs.qualisys.com/qtm/content/processing_measurement/6dof_data_format.htm
                 rotation_3x3 = (
                     np.array(rotation_values, dtype=float)
                     .reshape((3, 3), order="F")
@@ -1133,6 +1136,7 @@ class QtmStreamWorker:
                 continue
 
             # QTM packs Rot[0..8] column-wise, so reshape with Fortran order.
+            # Reference: https://docs.qualisys.com/qtm/content/processing_measurement/6dof_data_format.htm
             rotation_3x3 = np.array(rotation_values, dtype=float).reshape((3, 3), order="F")
 
             # Assemble the homogeneous transform in QTM's raw coordinate frame.

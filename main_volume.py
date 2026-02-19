@@ -53,6 +53,8 @@ class Volume3DCanvas(FigureCanvas):
         # Build the figure and axes once so updates are just data changes.
         figure = Figure()
         axes = figure.add_subplot(111, projection="3d")
+        # UI state change: enable tight layout so axis labels are not clipped in embedded Qt layouts.
+        figure.set_tight_layout(True)
         super().__init__(figure)
 
         # Keep a reference to the axes for fast updates later.
