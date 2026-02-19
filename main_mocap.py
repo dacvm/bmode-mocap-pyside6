@@ -755,11 +755,12 @@ class CsvRecordWorker:
                     row.extend([RECORD_NAN] * 7)
                     continue
 
-                rotation_3x3 = [
-                    rotation_values[0:3],
-                    rotation_values[3:6],
-                    rotation_values[6:9],
-                ]
+                # QTM packs Rot[0..8] column-wise, so we must reshape with Fortran order.
+                rotation_3x3 = (
+                    np.array(rotation_values, dtype=float)
+                    .reshape((3, 3), order="F")
+                    .tolist()
+                )
                 quat = self._rotation_matrix_to_quaternion(rotation_3x3)
 
                 # Optional sign continuity to avoid sudden sign flips per body.
@@ -1131,8 +1132,8 @@ class QtmStreamWorker:
                 poses[name] = None
                 continue
 
-            # QTM delivers r11..r33 in row-major order; reshape in C-order for consistency.
-            rotation_3x3 = np.array(rotation_values, dtype=float).reshape((3, 3))
+            # QTM packs Rot[0..8] column-wise, so reshape with Fortran order.
+            rotation_3x3 = np.array(rotation_values, dtype=float).reshape((3, 3), order="F")
 
             # Assemble the homogeneous transform in QTM's raw coordinate frame.
             pose_matrix = np.eye(4, dtype=float)
