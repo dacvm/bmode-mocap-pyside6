@@ -144,6 +144,10 @@ class Volume3DCanvas(FigureCanvas):
             self._axes.set_ylim(0.0, 1.0)
             self._axes.set_zlim(0.0, 1.0)
 
+        # Set the axis
+        self._axes.set_aspect("equal")
+        self._axes.set_proj_type("ortho")
+
         # Request a redraw without blocking the UI thread.
         self.draw_idle()
 

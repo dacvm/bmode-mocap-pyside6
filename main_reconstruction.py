@@ -654,7 +654,8 @@ class MainWindow(QMainWindow):
         if self.ui.radioButton_mha.isChecked():
             selected_mode = ".mha"
             output_mha_path = self._build_mha_output_path(normalized_record_dir)
-            writer = MhaWriter(invert_transforms=False)
+            # writer = MhaWriter(invert_transforms=False)
+            writer = MhaWriter(invert_transforms=True)
             try:
                 writer.start(output_mha_path)
             except Exception as exc:
